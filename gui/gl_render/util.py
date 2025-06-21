@@ -116,9 +116,13 @@ def set_attributes(program, keys, values, vao=None, buffer_ids=None):
         glBindBuffer(GL_ARRAY_BUFFER, b)
         glBufferData(GL_ARRAY_BUFFER, value.nbytes, value.reshape(-1), GL_STATIC_DRAW)
         length = value.shape[-1]
+
         pos = glGetAttribLocation(program, key)
+
         glVertexAttribPointer(pos, length, GL_FLOAT, False, 0, None)
         glEnableVertexAttribArray(pos)
+
+        #print(key, value, value.nbytes, b, pos, length)
 
     glBindBuffer(GL_ARRAY_BUFFER, 0)
     return vao, buffer_ids

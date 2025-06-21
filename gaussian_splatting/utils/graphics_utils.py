@@ -38,11 +38,17 @@ def getWorld2View2(R, t, translate=torch.tensor([0.0, 0.0, 0.0]), scale=1.0):
     Rt[:3, 3] = t
     Rt[3, 3] = 1.0
 
-    C2W = torch.linalg.inv(Rt)
+    try:
+        C2W = torch.linalg.inv(Rt)
+    except torch._C._LinAlgError:
+        # 대각선 요소에 작은 값 추가
+        C2W = torch.linalg.inv(Rt+1e-6 *torch.eye(4, device=R.device))
+
     cam_center = C2W[:3, 3]
     cam_center = (cam_center + translate) * scale
     C2W[:3, 3] = cam_center
     Rt = torch.linalg.inv(C2W)
+
     return Rt
 
 

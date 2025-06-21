@@ -687,7 +687,6 @@ def run(params_gui=None):
     win = SLAM_GUI(params_gui)
     app.run()
 
-
 def main():
     app = o3d.visualization.gui.Application.instance
     app.initialize()
