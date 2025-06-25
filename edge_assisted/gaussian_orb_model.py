@@ -501,7 +501,7 @@ class GaussianOrbModel(GaussianModel):
 
         #print("repeat", new_indices.size() , prune_filter.size()," || ",N, Ns, torch.count_nonzero(selected_pts_mask), Nold, Nold + Ns, N2, self._xyz.size()[0],
         #      torch.count_nonzero(new_isfeatures), np.count_nonzero(new_observations))
-        return new_indices, prune_filter, split_prune_feature, split_prune_obs, new_isfeatures, new_observations
+        return new_indices, prune_filter, new_isfeatures, new_observations
 
     def densify_and_clone(self, grads, grad_threshold, scene_extent):
         # Extract points that satisfy the gradient condition
@@ -560,8 +560,7 @@ class GaussianOrbModel(GaussianModel):
         #mask 까지는 크기가 같고, 적용 후 크기가 달라야 함
         gaussian_features = self.isfeatured.clone()
         gaussian_observation = self.observations.copy()
-        split_indices, split_filter, split_prune_feature, split_prune_obs,\
-            split_features, split_observations=self.densify_and_split(grads, max_grad, extent)
+        split_indices, split_filter, split_features, split_observations=self.densify_and_split(grads, max_grad, extent)
 
         gaussians_indices = torch.cat((gaussians_indices, split_indices)).int()
         gaussian_features = torch.cat((gaussian_features,split_features)).bool()
@@ -578,21 +577,21 @@ class GaussianOrbModel(GaussianModel):
                 torch.logical_or(prune_mask, big_points_vs), big_points_ws
             )
 
-        temp_prune_feature = self.isfeatured[prune_mask]
-        temp_prune_obs = self.observations[prune_mask.cpu().numpy()]
+        #temp_prune_feature = self.isfeatured[prune_mask]
+        #temp_prune_obs = self.observations[prune_mask.cpu().numpy()]
 
         #self.update_gaussian_observation_before_prune(prune_mask, frames)
         self.prune_points(prune_mask)
 
         #prune obs
-        temp_indices = torch.where(split_filter)[0] #
+        #temp_indices = torch.where(split_filter)[0] #
 
         #두 필터 합치기
         selected_indices = torch.where(~split_filter)[0]
         split_filter[selected_indices] = prune_mask
 
-        print('equal features', torch.equal(gaussian_features[~split_filter], self.isfeatured))
-        print('equal observation',numpy.equal(gaussian_observation[~split_filter.cpu().numpy()], self.observations))
+        #print('equal features', torch.equal(gaussian_features[~split_filter], self.isfeatured))
+        #print('equal observation',numpy.equal(gaussian_observation[~split_filter.cpu().numpy()], self.observations))
 
         #두 삭제 된 obs 합치기
         ##fail

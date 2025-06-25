@@ -67,10 +67,17 @@ class EdgeFrontEnd(WinFrontEnd):
             self.frames[kf_id].gaussianpoints = gaussianpoints
 
         #update frame gaussianpoints
-        prune = data[5]
-        if prune is not None and prev_frame_idx is not None:
+        prune_dict = data[5]
+        if prune_dict is not None and prev_frame_idx is not None:
             frame = self.frames[prev_frame_idx]
-            frame.gaussianpoints = torch.full((frame.keypoints.shape[0],),-1)
+            #frame.gaussianpoints = torch.full((frame.keypoints.shape[0],),-1)
+
+            for kpidx, gid in enumerate(frame.gaussianpoints):
+                gid = gid.item()
+                if gid == -1:
+                    continue
+                if gid in prune_dict:
+                    frame.gaussianpoints[kpidx] = prune_dict[gid]
 
             """
             mask = [
@@ -85,7 +92,7 @@ class EdgeFrontEnd(WinFrontEnd):
                 kp_idx = obs[prev_frame_idx]
                 frame.gaussianpoints[kp_idx] = gidx
             """
-            print("update test", data[0], prev_frame_idx, len(prune))
+            print("frontend::update test", data[0], prev_frame_idx, len(prune_dict))
 
     def tracking(self, cur_frame_idx, prev_frame_idx, viewpoint):
 
@@ -145,7 +152,7 @@ class EdgeFrontEnd(WinFrontEnd):
                 render_pkg["opacity"],
             )
             pose_optimizer.zero_grad()
-            """
+
             ##reprojection error
             projection, points = curr_frame.get_correspondence(self.gaussians, viewpoint.R, viewpoint.T,
                                                                viewpoint.fx, viewpoint.fy, viewpoint.cx, viewpoint.cy,
@@ -154,8 +161,8 @@ class EdgeFrontEnd(WinFrontEnd):
                                                                delta_trans=viewpoint.cam_trans_delta,
                                                                )
             loss_tracking = get_reprojection_loss(projection, points)
-            """
-            loss_tracking = get_loss_tracking(self.config, image, depth, opacity, viewpoint)
+
+            #loss_tracking += get_loss_tracking(self.config, image, depth, opacity, viewpoint)
             t3 = t3+time.time()
             loss_tracking.backward()
             t4 = t4+time.time()
