@@ -65,14 +65,14 @@ class EdgeFrontEnd(WinFrontEnd):
             self.cameras[kf_id].update_RT(kf_R.clone().to(self.device), kf_T.clone().to(self.device))
         for kf_id, gaussianpoints in frames:
             self.frames[kf_id].gaussianpoints = gaussianpoints
-            #mask = gaussianpoints > 1
-            #print(kf_id, self.frames[kf_id].gaussianpoints, torch.count_nonzero(mask))
 
         #update frame gaussianpoints
-        if prev_frame_idx is not None:
-            print('frame update', prev_frame_idx)
+        prune = data[5]
+        if prune is not None and prev_frame_idx is not None:
             frame = self.frames[prev_frame_idx]
-            frame.gaussianpoints =  torch.full((frame.keypoints.shape[0],),-1)
+            frame.gaussianpoints = torch.full((frame.keypoints.shape[0],),-1)
+
+            """
             mask = [
                 x is not None
                 and isinstance(x, dict)
@@ -84,6 +84,8 @@ class EdgeFrontEnd(WinFrontEnd):
             for gidx, obs in zip(indices,frame_gaussians):
                 kp_idx = obs[prev_frame_idx]
                 frame.gaussianpoints[kp_idx] = gidx
+            """
+            print("update test", data[0], prev_frame_idx, len(prune))
 
     def tracking(self, cur_frame_idx, prev_frame_idx, viewpoint):
 
@@ -143,19 +145,17 @@ class EdgeFrontEnd(WinFrontEnd):
                 render_pkg["opacity"],
             )
             pose_optimizer.zero_grad()
-
+            """
+            ##reprojection error
             projection, points = curr_frame.get_correspondence(self.gaussians, viewpoint.R, viewpoint.T,
                                                                viewpoint.fx, viewpoint.fy, viewpoint.cx, viewpoint.cy,
                                                                viewpoint.image_width, viewpoint.image_height,
                                                                delta_rot= viewpoint.cam_rot_delta,
                                                                delta_trans=viewpoint.cam_trans_delta,
                                                                )
-            #print(projection.device, points.device, projection.grad_fn)
-            #print(projection.requires_grad, points.requires_grad)
             loss_tracking = get_reprojection_loss(projection, points)
-            #print('before', loss_tracking)
-            loss_tracking += get_loss_tracking(self.config, image, depth, opacity, viewpoint)
-            #print('after',loss_tracking)
+            """
+            loss_tracking = get_loss_tracking(self.config, image, depth, opacity, viewpoint)
             t3 = t3+time.time()
             loss_tracking.backward()
             t4 = t4+time.time()
@@ -179,7 +179,7 @@ class EdgeFrontEnd(WinFrontEnd):
 
             if converged:
                 break
-        print("tracking processig time", t_n,(t2-t1),(t3-t2), (t4-t3))
+        print("tracking processig time", cur_frame_idx, t_n,(t2-t1),(t3-t2), (t4-t3), self.gaussians._xyz.size()[0])
         self.median_depth = get_median_depth(depth, opacity)
 
         return render_pkg
@@ -261,12 +261,7 @@ class EdgeFrontEnd(WinFrontEnd):
 
                 curr_frame = self.dataset[str(cur_frame_idx)]
                 self.frames[cur_frame_idx] = curr_frame
-                """
-                if True:
-                    image = cv2.remap(frame.color, self.dataset.map1x, self.dataset.map1y, cv2.INTER_LINEAR)
-                else:
-                    image = frame.color
-                """
+
                 pred = self.testManager.feature_model.run(curr_frame.color)
                 keypoints = pred['keypoints']
                 curr_frame.descriptors = pred['descriptors']

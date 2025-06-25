@@ -30,7 +30,7 @@ class EdgeBackEnd(WinBackEnd):
         self.FeatureManager = None
         self.frames={}
 
-    def push_to_frontend(self, tag=None, first_id = None):
+    def push_to_frontend(self, tag=None, first_id = None, prune = None):
 
         self.last_sent = 0
         keyframes = []
@@ -50,8 +50,13 @@ class EdgeBackEnd(WinBackEnd):
 
         if tag is None:
             tag = "sync_backend"
+
+        prune_data = None
+        if prune is not None:
+            prune_data = prune
+
         #print("push_to_frontend::end", len(frames))
-        msg = [tag, move_gaussianmodel_to_cpu(self.gaussians), move_occ_visibility_to_cpu(self.occ_aware_visibility), (keyframes), (frames)]
+        msg = [tag, move_gaussianmodel_to_cpu(self.gaussians), move_occ_visibility_to_cpu(self.occ_aware_visibility), (keyframes), (frames), (prune_data)]
         self.frontend_queue.put(msg)
 
     def reset(self):
@@ -72,26 +77,48 @@ class EdgeBackEnd(WinBackEnd):
             self.backend_queue.get()
 
     def add_next_kf(self, frame_idx, viewpoint, init=False, scale=2.0, depth_map=None, frame=None):
+        self.update_gaussian_observation_with_frame(frame)
+
         self.gaussians.extend_from_pcd_seq(
             viewpoint, kf_id=frame_idx, init=init, scale=scale, depthmap=depth_map,frame=frame
         )
+        return
+
+    def update_gaussian_observation_with_frame(self, frame):
+
+        # keyframe index
+        indices = torch.where(frame.gaussianpoints > -1)[0]
+
+        for kp_idx in indices:
+            g_idx = frame.gaussianpoints[kp_idx]
+            self.gaussians.isfeatured[g_idx] = True
+            if self.gaussians.observations[g_idx] is None:
+                self.gaussians.observations[g_idx] = {}
+            self.gaussians.observations[g_idx][frame.id] = kp_idx.item()
+
+    def update_gaussian_observation(self, prune_obs):
+        #print('update_gaussian_observation',prune_obs)
+        print('update_gaussian_observation', type(prune_obs))
+        for idx, obs in prune_obs.items():
+            #print("aaaaa", idx, obs)
+            if obs is not None:
+                for fid, kpidx in obs.items():
+                    #print('update gaussian', idx, fid, kpidx)
+                    self.frames[fid].gaussianpoints[kpidx] = -1
+
 
     def update_gaussian_observation_after_prune(self):
         print('update_gaussian_observation_after_prune',self.gaussians._xyz.size(), self.gaussians.isfeatured.size(), self.gaussians.observations.shape,
               torch.count_nonzero(self.gaussians.isfeatured), np.count_nonzero(self.gaussians.observations), np.sum(self.gaussians.observations!=None))
         feature_indices = self.gaussians.isfeatured.clone().cpu().numpy()
-        gaussian_indices = torch.arange(self.gaussians._xyz.size()[0])
-        gaussian_obs = self.gaussians.observations[feature_indices]
-        gaussian_indices = gaussian_indices[feature_indices]
-        #Ng = self.gaussians._xyz.size()[0]
+        feature_indices = np.where(feature_indices)[0]
+        gaussian_obs = list(zip(feature_indices, self.gaussians.observations[feature_indices]))
 
-        for gaussian_index, obs in zip(gaussian_indices, gaussian_obs):
+        for gaussian_index, obs in gaussian_obs:
             if obs is None:
-                #print(gaussian_index, obs)
+                print('obs error', gaussian_index, obs)
                 self.gaussians.isfeatured[gaussian_index] = False
                 continue
-            #if gaussian_index > Ng :
-            #    print('gaussian index error', gaussian_index)
             for fid, kpidx in obs.items():
                 #print("update_gaussian frame", fid)
                 frame = self.frames[(fid)]
@@ -155,12 +182,12 @@ class EdgeBackEnd(WinBackEnd):
                 )
 
                 if mapping_iteration % self.init_gaussian_update == 0:
-                    prune_mask = self.gaussians.densify_and_prune(
+                    Noldobs = torch.count_nonzero(self.gaussians.isfeatured)
+                    gaussian_indices, prune_mask, prune_obs = self.gaussians.densify_and_prune(
                         self.opt_params.densify_grad_threshold,
                         self.init_gaussian_th,
                         self.init_gaussian_extent,
                         None,
-                        self.frames
                     )
                     """
                     gaussian_indices = torch.arange(self.gaussians._xyz.size()[0])
@@ -171,8 +198,10 @@ class EdgeBackEnd(WinBackEnd):
                             frame = self.dataset[str(fid)]
                             frame.gaussianpoints[kpidx] = gaussian_index
                     """
+                    #여기서 삭제 된것 + 남은 것 갱신
+                    self.update_gaussian_observation(prune_obs)
                     self.update_gaussian_observation_after_prune()
-
+                    #print("prune num test", Noldobs, len(prune_obs), torch.count_nonzero(self.gaussians.isfeatured))
                 if self.iteration_count == self.init_gaussian_reset or (
                     self.iteration_count == self.opt_params.densify_from_iter
                 ):
@@ -187,7 +216,7 @@ class EdgeBackEnd(WinBackEnd):
 
     def map(self, current_window, prune=False, iters=1):
         if len(current_window) == 0:
-            return
+            return None
 
         viewpoint_stack = [self.viewpoints[kf_idx] for kf_idx in current_window]
         random_viewpoint_stack = []
@@ -198,6 +227,9 @@ class EdgeBackEnd(WinBackEnd):
             if cam_idx in current_window_set:
                 continue
             random_viewpoint_stack.append(viewpoint)
+
+        prune_mask = None
+        gaussian_indices = None
 
         for _ in range(iters):
             self.iteration_count += 1
@@ -303,6 +335,7 @@ class EdgeBackEnd(WinBackEnd):
             loss_mapping.backward()
 
             gaussian_split = False
+
             ## Deinsifying / Pruning Gaussians
             with torch.no_grad():
                 self.occ_aware_visibility = {}
@@ -314,6 +347,7 @@ class EdgeBackEnd(WinBackEnd):
                 # # compute the visibility of the gaussians
                 # # Only prune on the last iteration and when we have full window
                 if prune:
+                    to_prune = None
                     if len(current_window) == self.config["Training"]["window_size"]:
                         prune_mode = self.config["Training"]["prune_mode"]
                         prune_coviz = 3
@@ -334,6 +368,7 @@ class EdgeBackEnd(WinBackEnd):
                                 self.gaussians.n_obs <= prune_coviz, mask
                             )
                         if to_prune is not None and self.monocular:
+                            #여기도 직접 수정해야 함.
                             self.gaussians.update_gaussian_observation_before_prune(to_prune.cuda(), self.frames)
                             self.gaussians.prune_points(to_prune.cuda())
                             for idx in range((len(current_window))):
@@ -341,12 +376,13 @@ class EdgeBackEnd(WinBackEnd):
                                 self.occ_aware_visibility[current_idx] = (
                                     self.occ_aware_visibility[current_idx][~to_prune]
                                 )
+                            self.update_gaussian_observation(prune_obs)
                             self.update_gaussian_observation_after_prune()
                         if not self.initialized:
                             self.initialized = True
                             Log("Initialized SLAM")
                         # # make sure we don't split the gaussians, break here.
-                    return False
+                    return False, None, None
 
                 for idx in range(len(viewspace_point_tensor_acm)):
                     self.gaussians.max_radii2D[visibility_filter_acm[idx]] = torch.max(
@@ -362,13 +398,13 @@ class EdgeBackEnd(WinBackEnd):
                     == self.gaussian_update_offset
                 )
                 if update_gaussian:
-                    prune_mask = self.gaussians.densify_and_prune(
+                    gaussian_indices, prune_mask, prune_obs = self.gaussians.densify_and_prune(
                         self.opt_params.densify_grad_threshold,
                         self.gaussian_th,
                         self.gaussian_extent,
                         self.size_threshold,
-                        self.frames
                     )
+                    self.update_gaussian_observation(prune_obs)
                     self.update_gaussian_observation_after_prune()
                     gaussian_split = True
 
@@ -377,7 +413,9 @@ class EdgeBackEnd(WinBackEnd):
                     not update_gaussian
                 ):
                     Log("Resetting the opacity of non-visible Gaussians")
+                    print("before, ", self.gaussians._xyz.size())
                     self.gaussians.reset_opacity_nonvisible(visibility_filter_acm)
+                    print("after, ", self.gaussians._xyz.size())
                     gaussian_split = True
 
                 self.gaussians.optimizer.step()
@@ -391,9 +429,10 @@ class EdgeBackEnd(WinBackEnd):
                     if viewpoint.uid == self.first_kf_id or not self.pose_update:
                         continue
                     update_pose(viewpoint)
-        return gaussian_split
+        return gaussian_split, prune_mask, gaussian_indices
 
     def run(self):
+        prune_dict = None
         while True:
             if self.backend_queue.empty():
                 if self.pause:
@@ -408,10 +447,32 @@ class EdgeBackEnd(WinBackEnd):
                     continue
 
                 s = time.time()
-                self.map(self.current_window)
+                Nold = self.gaussians._xyz.size()[0]
+                prune_idxs = None
+                prune_mask = None
+                _, prune_mask1, prune_idxs1 = self.map(self.current_window)
+                if prune_mask1 is not None:
+                    prune_idxs = prune_idxs1
+                    prune_mask = prune_mask1
                 if self.last_sent >= 10:
-                    self.map(self.current_window, prune=True, iters=10)
-                    self.push_to_frontend()
+                    _, prune_mask2, prune_idxs2 = self.map(self.current_window, prune=True, iters=10)
+                    if prune_mask2 is not None:
+                        prune_idxs = prune_idxs2
+                        prune_mask = prune_mask2
+
+                if prune_mask is not None:
+                    old_idxs = prune_idxs[:Nold]
+                    old_masks = prune_mask[:Nold]
+
+                    Nnew = torch.count_nonzero(~old_masks)
+                    new_idxs = torch.arange(Nold)
+                    new_idxs[~old_masks] = torch.arange(Nnew)
+                    new_idxs[old_masks] = -1
+
+                    prune_dict = {k.item(): v.item() for k, v in zip(old_idxs, new_idxs)}
+                    print('update dict', len(prune_dict), torch.unique(new_idxs).size()[0], Nnew, self.gaussians.isfeatured[-1], self.gaussians.isfeatured.size(), self.gaussians.observations.shape)
+
+                self.push_to_frontend(prune=prune_dict)
                 e = time.time()
                 #print("backend = mapping with empty queue", (e-s))
             else:
@@ -471,7 +532,27 @@ class EdgeBackEnd(WinBackEnd):
                     frame.keypoints, frame.descriptors, frame.gaussianpoints = f
                     self.frames[(cur_frame_idx)] = frame
 
+                    if prune_dict is not None:
+                        for kpidx, gid in enumerate(frame.gaussianpoints):
+                            gid = gid.item()
+                            if gid == -1:
+                                continue
+                            if gid in prune_dict:
+                                frame.gaussianpoints[kpidx] = prune_dict[gid]
+
+                        #print('frame equal test', np.equal(frame.gaussianpoints, self.frames[cur_frame_idx].gaussianpoints))
+                    Nold = self.gaussians._xyz.size()[0]
                     self.add_next_kf(cur_frame_idx, viewpoint, depth_map=depth_map, frame=frame)
+
+                    ##add match and observation
+                    a = time.time()
+                    temp_kf_window = [x for x in current_window if x != cur_frame_idx]
+                    for kf_idx in temp_kf_window:
+                        keyframe = self.frames[kf_idx]
+                        matches = self.FeatureManager.tracker.match(frame.descriptors, keyframe.descriptors)
+                    b = time.time()
+                    #print("kf match = ", len(temp_kf_window), b-a)
+                    ##add match and observation
 
                     opt_params = []
                     frames_to_optimize = self.config["Training"]["pose_window"]
@@ -527,12 +608,33 @@ class EdgeBackEnd(WinBackEnd):
                         )
                     self.keyframe_optimizers = torch.optim.Adam(opt_params)
                     m1 = time.time()
-                    self.map(self.current_window, iters=iter_per_kf)
-                    self.map(self.current_window, prune=True)
+                    prune_idxs = None
+                    prune_mask = None
+                    _, prune_mask1, prune_idxs1 = self.map(self.current_window, iters=iter_per_kf)
+                    if prune_mask1 is not None:
+                        prune_idxs = prune_idxs1
+                        prune_mask = prune_mask1
+                    _, prune_mask1, prune_idxs1 = self.map(self.current_window, prune=True)
+                    if prune_mask1 is not None:
+                        prune_idxs = prune_idxs1
+                        prune_mask = prune_mask1
+
+                    if prune_mask is not None:
+                        old_idxs = prune_idxs[:Nold]
+                        old_masks = prune_mask[:Nold]
+
+                        #여기 데이터 축소 필요
+                        Nnew = torch.count_nonzero(~old_masks)
+                        new_idxs = torch.arange(Nold)
+                        new_idxs[~old_masks] = torch.arange(Nnew)
+                        new_idxs[old_masks] = -1
+                        prune_dict = {k.item(): v.item() for k, v in zip(old_idxs, new_idxs)}
+                        print('update dict', len(prune_dict), torch.unique(new_idxs).size()[0], Nnew, self.gaussians.isfeatured.size(), self.gaussians.observations.shape)
+
                     e1 = time.time()
-                    self.push_to_frontend("keyframe")
+                    self.push_to_frontend("keyframe", prune=prune_dict)
                     e2 = time.time()
-                    print(cur_frame_idx, self.gaussians._xyz.size(), 'mapping time = ', (e1-s), (e2-e1), e1-m1)
+
                 else:
                     raise Exception("Unprocessed data", data)
         while not self.backend_queue.empty():

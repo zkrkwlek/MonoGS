@@ -1,3 +1,4 @@
+import numpy
 import torch
 import torch.nn as nn
 import numpy as np
@@ -431,7 +432,7 @@ class GaussianOrbModel(GaussianModel):
         if new_observations is not None:
             self.observations = np.concatenate((self.observations, new_observations))
 
-    def densify_and_split(self, grads, grad_threshold, scene_extent, frames, N=2):
+    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device="cuda")
@@ -461,8 +462,20 @@ class GaussianOrbModel(GaussianModel):
         new_kf_id = self.unique_kfIDs[selected_pts_mask.cpu()].repeat(N)
         new_n_obs = self.n_obs[selected_pts_mask.cpu()].repeat(N)
 
-        new_isfeatures = self.isfeatured[selected_pts_mask.cpu()].repeat(N)
-        new_observations = self.observations[selected_pts_mask.cpu().numpy()].repeat(N)
+        new_isfeatures = self.isfeatured[selected_pts_mask].repeat(N)
+        new_observations = np.tile(self.observations[selected_pts_mask.cpu().numpy()],N)
+
+        new_indices = torch.where(selected_pts_mask)[0].repeat(N)
+        Nold = self._xyz.size()[0]
+
+        #torch.set_printoptions(profile="full")
+        #np.set_printoptions(threshold=np.inf)
+        #print('bool',new_isfeatures)
+        #print('dict',new_observations)
+        #print('int',new_indices)
+
+        split_prune_feature = self.isfeatured[selected_pts_mask]
+        split_prune_obs = self.observations[selected_pts_mask.cpu().numpy()]
 
         self.densification_postfix(
             new_xyz,
@@ -483,8 +496,12 @@ class GaussianOrbModel(GaussianModel):
                 torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool),
             )
         )
-        self.update_gaussian_observation_before_prune(prune_filter, frames)
+        #self.update_gaussian_observation_before_prune(prune_filter, frames)
         self.prune_points(prune_filter)
+
+        #print("repeat", new_indices.size() , prune_filter.size()," || ",N, Ns, torch.count_nonzero(selected_pts_mask), Nold, Nold + Ns, N2, self._xyz.size()[0],
+        #      torch.count_nonzero(new_isfeatures), np.count_nonzero(new_observations))
+        return new_indices, prune_filter, split_prune_feature, split_prune_obs, new_isfeatures, new_observations
 
     def densify_and_clone(self, grads, grad_threshold, scene_extent):
         # Extract points that satisfy the gradient condition
@@ -507,8 +524,11 @@ class GaussianOrbModel(GaussianModel):
         new_kf_id = self.unique_kfIDs[selected_pts_mask.cpu()]
         new_n_obs = self.n_obs[selected_pts_mask.cpu()]
 
-        new_isfeatures = self.isfeatured[selected_pts_mask.cpu()]
+        new_isfeatures = self.isfeatured[selected_pts_mask]
         new_observations = self.observations[selected_pts_mask.cpu().numpy()]
+
+        Nold = self._xyz.size()[0]
+        new_indices = torch.where(selected_pts_mask)[0]
 
         self.densification_postfix(
             new_xyz,
@@ -522,15 +542,33 @@ class GaussianOrbModel(GaussianModel):
             new_isfeatures=new_isfeatures,
             new_observations=new_observations
         )
+        #print("clone",Nc, Nold, Nold+Nc, self._xyz.size()[0], torch.count_nonzero(new_isfeatures), np.count_nonzero(new_observations))
+        return new_indices
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, frames:dict):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
+
+        gaussians_indices = torch.arange(self._xyz.size()[0]).cuda()
+        Nold = self._xyz.size()[0]
+
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
-        #print("densify_and_prune::start", self._xyz.size())
-        self.densify_and_clone(grads, max_grad, extent)
-        #print("densify_and_prune::clone", self._xyz.size())
-        self.densify_and_split(grads, max_grad, extent, frames)
-        #print("densify_and_prune::split", self._xyz.size())
+
+        clone_indices = self.densify_and_clone(grads, max_grad, extent)
+        gaussians_indices = torch.cat((gaussians_indices, clone_indices)).int()
+        print("densify_and_prune::clone", gaussians_indices.size(), self._xyz.size()[0])
+
+        #mask 까지는 크기가 같고, 적용 후 크기가 달라야 함
+        gaussian_features = self.isfeatured.clone()
+        gaussian_observation = self.observations.copy()
+        split_indices, split_filter, split_prune_feature, split_prune_obs,\
+            split_features, split_observations=self.densify_and_split(grads, max_grad, extent)
+
+        gaussians_indices = torch.cat((gaussians_indices, split_indices)).int()
+        gaussian_features = torch.cat((gaussian_features,split_features)).bool()
+        gaussian_observation = numpy.concatenate((gaussian_observation, split_observations))
+
+        print("densify_and_prune::split", gaussians_indices.size(), split_filter.size(), self._xyz.size()[0])
+
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
@@ -540,11 +578,37 @@ class GaussianOrbModel(GaussianModel):
                 torch.logical_or(prune_mask, big_points_vs), big_points_ws
             )
 
-        self.update_gaussian_observation_before_prune(prune_mask, frames)
+        temp_prune_feature = self.isfeatured[prune_mask]
+        temp_prune_obs = self.observations[prune_mask.cpu().numpy()]
+
+        #self.update_gaussian_observation_before_prune(prune_mask, frames)
         self.prune_points(prune_mask)
-        #print("densify_and_prune::end", self._xyz.size(), self.isfeatured.size(), torch.count_nonzero(self.isfeatured),
-        #      self.observations.shape, np.count_nonzero(self.observations), torch.count_nonzero(prune_mask))
-        return prune_mask
+
+        #prune obs
+        temp_indices = torch.where(split_filter)[0] #
+
+        #두 필터 합치기
+        selected_indices = torch.where(~split_filter)[0]
+        split_filter[selected_indices] = prune_mask
+
+        print('equal features', torch.equal(gaussian_features[~split_filter], self.isfeatured))
+        print('equal observation',numpy.equal(gaussian_observation[~split_filter.cpu().numpy()], self.observations))
+
+        #두 삭제 된 obs 합치기
+        ##fail
+        #temp_indices2 = torch.where(split_filter[selected_indices])[0]
+        #temp_prune_indices = torch.cat((temp_indices, temp_indices2))
+        #temp_prune_feature = torch.cat((split_prune_feature, temp_prune_feature))
+        #temp_prune_obs = np.concatenate((split_prune_obs,temp_prune_obs))
+
+        temp_prune_indices = torch.where(split_filter)[0]
+        temp_prune_feature = gaussian_features[split_filter]
+        temp_prune_obs = gaussian_observation[split_filter.cpu().numpy()]
+
+        prune_obs = {k.item(): v for k, v, b in zip(temp_prune_indices, temp_prune_obs, temp_prune_feature) if b and k < Nold}
+        #print('test', torch.count_nonzero(temp_prune_feature), np.count_nonzero(temp_prune_obs))
+        print('densify_and_prune::prune', Nold, len(prune_obs), gaussians_indices[~split_filter].size()[0],self._xyz.size()[0], temp_prune_indices.size()[0], torch.count_nonzero(split_filter), gaussians_indices[split_filter].size()[0])
+        return gaussians_indices, split_filter, prune_obs
 
     def prune_points(self, mask):
         valid_points_mask = ~mask
@@ -564,11 +628,12 @@ class GaussianOrbModel(GaussianModel):
         self.unique_kfIDs = self.unique_kfIDs[valid_points_mask.cpu()]
         self.n_obs = self.n_obs[valid_points_mask.cpu()]
 
-        self.isfeatured = self.isfeatured[valid_points_mask.cpu()]
+        self.isfeatured = self.isfeatured[valid_points_mask]
         self.observations = self.observations[valid_points_mask.cpu().numpy()]
         #observation도 처리 필요
 
-    def update_gaussian_observation_before_prune(self, mask, frames:dict):
+    """
+    def update_gaussian_observation_before_prune(self, mask):
 
         feature_indices = self.isfeatured.clone().cpu().numpy()
         gaussian_indices = torch.arange(self._xyz.size()[0])
@@ -586,8 +651,10 @@ class GaussianOrbModel(GaussianModel):
             for fid, kpidx in obs.items():
                 #print("update_gaussian frame", fid)
                 frame = frames[(fid)]
+                #temp_gidx = frame.gaussianpoints[kpidx]
+                #if gaussian_index == temp_gidx:
                 frame.gaussianpoints[kpidx] = -1
-
+    """
 
 class GaussianOrbWarppingModel:
     """
