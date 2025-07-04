@@ -12,7 +12,7 @@ class SimpleTracker(object):
         matches = self.mnn_mather(desc1, desc2)
         return matches
 
-    def visualize2(self, img, pts1, pts2, delay = 0):
+    def visualize2(self, img, pts1, pts2, delay = 0, save = False, filename = None):
         out = copy.deepcopy(img)
         points1 = pts1.detach().cpu().numpy()
         points2 = pts2.detach().cpu().numpy()
@@ -20,11 +20,15 @@ class SimpleTracker(object):
             p1 = (int(round(pt1[0])), int(round(pt1[1])))
             p2 = (int(round(pt2[0])), int(round(pt2[1])))
 
-            cv2.line(out, p1, p2, (0, 255, 0), lineType=16)
+            cv2.line(out, p1, p2, (0, 255, 0), 2, lineType=16)
             cv2.circle(out, p1, 1, (0, 0, 255), -1, lineType=16)
             cv2.circle(out, p2, 1, (255, 0, 0), -1, lineType=16)
-        cv2.imshow("asdfasdfasdf",out)
-        cv2.waitKey(delay)
+
+        if save :
+            cv2.imwrite(filename, out)
+        else:
+            cv2.imshow("asdfasdfasdf",out)
+            cv2.waitKey(delay)
 
 
     def visualize(self, img1, img2, matches, pts1, pts2):

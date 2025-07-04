@@ -1,9 +1,18 @@
 import torch
 
+def get_patch_loss(patch, gt_patch):
+    return torch.abs(patch-gt_patch)
+
+def get_reprojection_loss2(gaussians, keypoints):
+    return gaussians-keypoints
+
 def get_reprojection_loss(gaussians, keypoints, weight = 0.05):
+    # 휴버 로스 추가
+    #l1 = keypoints-gaussians
     l1 = torch.abs(gaussians-keypoints)
     #l2 = torch.sum((gaussians - keypoints) ** 2, dim=1)
-    return l1.mean()*weight
+    #print(l1, l1.mean())
+    return l1#l1.mean()*weight
 
 def get_loss_tracking(config, image, depth, opacity, viewpoint, initialization=False):
     image_ab = (torch.exp(viewpoint.exposure_a)) * image + viewpoint.exposure_b
@@ -76,4 +85,4 @@ def get_loss_mapping_rgbd(config, image, depth, viewpoint, initialization=False)
     l1_rgb = torch.abs(image * rgb_pixel_mask - gt_image * rgb_pixel_mask)
     l1_depth = torch.abs(depth * depth_pixel_mask - gt_depth * depth_pixel_mask)
     #print("loss", l1_depth.mean(), l1_rgb.mean())
-    return alpha * l1_rgb.mean() + (1 - alpha) * l1_depth.mean()
+    return l1_rgb.mean(), l1_depth.mean()#alpha * l1_rgb.mean() + (1 - alpha) * l1_depth.mean()

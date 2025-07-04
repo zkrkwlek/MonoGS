@@ -5,6 +5,7 @@ from kornia.feature import LoFTR
 from ALIKED.nets.aliked import ALIKED
 from ALIKED.tracker import SimpleTracker
 
+
 def visualize_pc(points, colors, R, t, fx, fy, cx, cy, w, h, img = None):
     T = torch.eye(4, device=R.device, dtype=torch.float32)
     T[:3, :3] = R
@@ -94,6 +95,19 @@ def find_correspondence(points1, points2):
 
     return gauss_matching_indices, unmatched_keypoints_mask
 
+def projection(_X, R, t, fx, fy, cx, cy, w, h):
+    Xw = _X.to(R.dtype)
+    points_cam = R@Xw+t
+    X = points_cam[0]
+    Y = points_cam[1]
+    Z = points_cam[2]
+    u = (fx * X / Z + cx)
+    v = (fy * Y / Z + cy)
+
+    valid = (Z > 0) & (u >= 0) & (u < w) & (v >= 0) & (v < h)
+    return u, v, valid
+
+
 def project_pc_to_pixel(points, R, t, fx, fy, cx, cy, w, h):
     T = torch.eye(4, device=R.device, dtype=torch.float32)
     T[:3, :3] = R
@@ -127,7 +141,7 @@ def project_pc_to_pixel(points, R, t, fx, fy, cx, cy, w, h):
     valid_u = u[valid]
     valid_v = v[valid]
 
-    return torch.stack((valid_u, valid_v), axis=1), valid.detach().cpu().numpy()
+    return torch.stack((valid_u, valid_v), axis=1), valid#.detach().cpu().numpy()
 
 def project_3d_to_pixel(self,
                     point_3d: torch.Tensor,

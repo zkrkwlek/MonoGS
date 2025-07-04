@@ -75,8 +75,20 @@ class GaussianOrbModel(GaussianModel):
 
         self.isfeatured = torch.empty(0, device="cuda").bool()
         self.observations = np.full(0, None, dtype=object) #np dtype:object
-        #self.unique_gaussian_ids = torch.empty(0).long()
-        #self.global_gaussian_counter = 0
+        self.unique_gaussian_ids = torch.empty(0, device = "cuda").long()
+        self.global_gaussian_counter = 0
+
+    def clone(self, indices):
+        new_gaussians = GaussianOrbModel(self.max_sh_degree, self.config)
+
+        new_gaussians._xyz = self._xyz[indices].clone()
+        new_gaussians._features_dc = self._features_dc[indices].clone()
+        new_gaussians._features_rest = self._features_rest[indices].clone()
+        new_gaussians._scaling = self._scaling[indices].clone()
+        new_gaussians._rotation = self._rotation[indices].clone()
+        new_gaussians._opacity = self._opacity[indices].clone()
+
+        return new_gaussians
 
     def create_pcd_from_image(self, cam_info, init=False, scale=2.0, depthmap=None, keypoints=None):
         cam = cam_info
@@ -135,12 +147,7 @@ class GaussianOrbModel(GaussianModel):
             extrinsic=W2C,
             project_valid_depth_only=True,
         )
-        """
-        temp_xyz = np.asarray(pcd_tmp.points)
-        temp_pc = torch.from_numpy(temp_xyz).float().cuda()
-        temp_colors = torch.from_numpy(np.asarray(pcd_tmp.colors)).float().cuda()
-        visualize_pc(temp_pc,temp_colors, cam.R, cam.T, cam.fx, cam.fy, cam.cx, cam.cy, cam.image_width, cam.image_height)
-        """
+
         #farthest_point_down_sample(3000)
         #pcd_tmp = pcd_tmp.voxel_down_sample(voxel_size=0.03)
         pcd_tmp = pcd_tmp.random_down_sample(1.0 / downsample_factor)
@@ -148,63 +155,36 @@ class GaussianOrbModel(GaussianModel):
         if keypoints is not None:
             #프로젝션
             #키포인트 없으면 추가
-            temp_keypoints =torch.round(torch.from_numpy(np.asarray(keypoints)).cuda()).int()
-
+            #temp_keypoints =torch.round(torch.from_numpy(np.asarray(keypoints)).cuda()).int()
+            temp_keypoints = torch.round(keypoints).int()
             temp_backup_points = np.asarray(pcd_tmp.points)
             temp_backup_colors = np.asarray(pcd_tmp.colors)
 
             temp_points=torch.from_numpy(temp_backup_points).cuda()
             temp_points, temp_valid = project_pc_to_pixel(temp_points, cam.R, cam.T, cam.fx, cam.fy, cam.cx, cam.cy, cam.image_width, cam.image_height)
             temp_points = torch.round(temp_points).int()
-            rgb_np =np.asarray(rgb)
+
             rgb = torch.from_numpy(np.asarray(rgb)).cuda()
             depth = torch.from_numpy(np.asarray(depth)).cuda()
 
             #새로 생성하는 gaussian 포인트에서 매칭 대응쌍, 키포인트에서 매칭 안된 index mask
             match_index, unmatch_mask = find_correspondence(temp_points, temp_keypoints)
-            #is_in_points = (temp_keypoints.unsqueeze(1) == temp_points).all(dim=2).any(dim=1)
-            #not_in_points = ~is_in_points
             unique_keypoints = temp_keypoints[unmatch_mask]
             temp_unmatched_keypoints_index = torch.arange(0,unmatch_mask.size()[0]).cuda()[unmatch_mask]
 
             add_points, add_colors, valid_depth_mask = convert_xyz(unique_keypoints, rgb, depth)
             add_points = pixels_to_pc(add_points, cam.R, cam.T, cam.fx, cam.fy, cam.cx, cam.cy)
 
-            #print("init test",match_index.size(), temp_points.size(), add_points.size(), unique_keypoints.size(), torch.count_nonzero(valid_depth_mask), temp_unmatched_keypoints_index.size())
-
-            """
-            print(temp_unmatched_keypoints_index.size(), temp_keypoints.size())
-
-            visualize_pc(add_points, add_colors, cam.R, cam.T, cam.fx, cam.fy, cam.cx, cam.cy
-                         , cam.image_width, cam.image_height, rgb_np)
-
-            #print("overlap test", add_points.size(), unique_keypoints.size(), not_in_points.size())
-
-            
-            if True:
-
-                temp_points = project_pc_to_pixel(add_points.clone(), cam.R, cam.T, cam.fx, cam.fy, cam.cx, cam.cy,
-                                                  cam.image_width, cam.image_height)
-                temp_points = torch.round(temp_points).int()
-                is_in_points2 = (temp_keypoints.unsqueeze(1) == temp_points.unsqueeze(0)).all(dim=2).any(dim=1)
-                not_in_points2 = ~is_in_points2
-                print("overlap test = ", torch.count_nonzero(is_in_points2))
-            """
             add_points = add_points.cpu().detach().numpy()
             add_colors = add_colors.cpu().detach().numpy()/255
 
+            temp_valid = temp_valid.cpu().numpy()
             new_xyz = np.concatenate((temp_backup_points[temp_valid], add_points), axis=0)
             new_rgb = np.concatenate((temp_backup_colors[temp_valid], add_colors),axis=0)
             match_index = torch.concatenate((match_index, temp_unmatched_keypoints_index), axis = 0)
 
             matched_mask = match_index > -1
-            matched_indices = match_index[matched_mask]
-            #print("asdf", temp_backup_points[temp_valid].shape, temp_points.size())
-            #print("frame gaussian test",new_xyz.shape, match_index.size(), matched_indices.size(), temp_keypoints.size(), torch.count_nonzero(valid_depth_mask))
 
-            #new_xyz = np.asarray(pcd_tmp.points)
-            #new_rgb = np.asarray(pcd_tmp.colors)
-            #print("sampling", new_xyz.shape, add_points.shape, torch.count_nonzero(is_in_points))
         else:
             new_xyz = np.asarray(pcd_tmp.points)
             new_rgb = np.asarray(pcd_tmp.colors)
@@ -253,7 +233,6 @@ class GaussianOrbModel(GaussianModel):
     ):
 
         if frame is not None:
-            #convert_xyz(frame.keypoints, cam_info.original_image, cam_info.depth)
             keypoints = frame.keypoints
         else:
             keypoints =None
@@ -261,107 +240,35 @@ class GaussianOrbModel(GaussianModel):
         fused_point_cloud, features, scales, rots, opacities, match_index = (
             self.create_pcd_from_image(cam_info, init, scale=scale, depthmap=depthmap, keypoints=keypoints)
         )
-        #프레임의 키포인트가 비어있는 곳 확인해야 함.
-        #fused_point_cloud를 특징점과 연결
-        #다만, 카메라 좌표계에서 프로젝션하는지, 월드 좌표계에서 프로젝션하는지 확인필요
-        #cam_info가 viewpoint임. 그렇다면, 월드 좌표계라고 생각하면 편함.
-        #다만, 그냥 그대로 가우시안을 생성하는 거 같은데? overlap 되는 거 고려 안하고?
 
-        #두 개의 파라메터 추가
-        #N = fused_point_cloud의 수 만큼
-        #if frame is not None:
         Nold = self._xyz.size()[0]
         Nnew = fused_point_cloud.size()[0]
         new_isfeature = torch.zeros(Nnew,device="cuda").bool()
         new_observations = np.full(Nnew, None, dtype=object)
 
+        # global gaussian id
+        old_gaussian = self.global_gaussian_counter
+        self.global_gaussian_counter += Nnew
+        new_global_ids = torch.arange(old_gaussian, self.global_gaussian_counter).cuda()
+
         if frame is not None:
-            #매치 인덱스를 이용해서 가우시안 인덱스 넣기
-            #기존 가우시안 + N을 해야 함.
-            #-1인 경우에만
-            #frame.gaussianpoints = torch.full((frame.keypoints.shape[0],),-1)
             for gauss_idx, point in enumerate(fused_point_cloud):
                 kp_idx = match_index[gauss_idx]
                 if kp_idx > -1:
                     frame.gaussianpoints[kp_idx] = gauss_idx + Nold
                     new_isfeature[gauss_idx] = True
-                    new_observations[gauss_idx] = {frame.id:kp_idx.cpu().numpy()}
+                    new_observations[gauss_idx] = {frame.id:kp_idx.item()}
                     #new_observations[gauss_idx][frame.id] = kp_idx.numpy()
-            """            
-            points = project_pc_to_pixel(fused_point_cloud,
-                                         cam_info.R, cam_info.T, cam_info.fx, cam_info.fy, cam_info.cx, cam_info.cy,
-                                         cam_info.image_width, cam_info.image_height)
-            out = copy.deepcopy(frame.color)
-            
-            for gauss_idx, point in enumerate(points):
-                kp_idx = match_index[gauss_idx]
-                if kp_idx > 0:
-                    pt1 = (int(torch.round(point[0])), int(torch.round(point[1])))
-                    kp = frame.keypoints[kp_idx]
-                    pt2 = (int(round(kp[0])), int(round(kp[1])))
-                    cv2.line(out,pt1,pt2,(0,255,0), 2)
-
-            cv2.imshow("asdf", out)
-            cv2.waitKey((1))
-            """
-        """
-        radius = 1
-        if frame is not None:
-            points = project_pc_to_pixel(fused_point_cloud,
-                                cam_info.R, cam_info.T,cam_info.fx, cam_info.fy, cam_info.cx, cam_info.cy,
-                                cam_info.image_width, cam_info.image_height)
-
-            out = copy.deepcopy(frame.color)
-            mask = np.zeros((cam_info.image_height, cam_info.image_width), dtype=np.uint16)
-            for idx, kp in enumerate(frame.keypoints):
-                u, v = (int(round(kp[0])), int(round(kp[1])))
-                cv2.circle(mask, (u,v), radius, idx+1, -1)
-                cv2.circle(out, (u,v), 3, (0,255,0), 1)
-
-            inside=[]
-            for idx, kp in enumerate(points):
-                x, y = (int(torch.round(kp[0])), int(torch.round(kp[1])))
-                if x < 0 or x >= cam_info.image_width or y < 0 or y >= cam_info.image_height:
-                    continue
-                if mask[int(y), int(x)] > 0:
-                    inside.append((x, y))
-                cv2.circle(out, (x, y), 3, (255, 0, 0), 1)
-            print("matching test = ", len(inside))
-            cv2.imshow("asdf", out)
-            cv2.waitKey((1))
-        """
 
         self.extend_from_pcd(
-            fused_point_cloud, features, scales, rots, opacities, kf_id, isfeatures=new_isfeature, observations=new_observations
+            fused_point_cloud, features, scales, rots, opacities, kf_id, isfeatures=new_isfeature, observations=new_observations, global_ids=new_global_ids
         )
 
-        """
-        # 코드 확인
-        valid = frame.gaussianpoints > -1
-        gindex = frame.gaussianpoints[valid]
-        prev_frame_gaussians = self._xyz[gindex]
-        projection, valid_projection = project_pc_to_pixel(prev_frame_gaussians, cam_info.R, cam_info.T,
-                                                           cam_info.fx, cam_info.fy, cam_info.cx,
-                                                           cam_info.cy,
-                                                           cam_info.image_width, cam_info.image_height)
-        points = torch.from_numpy(frame.keypoints[valid][valid_projection]).cuda()
 
-        out = copy.deepcopy(frame.color)
-        points1 = projection.detach().cpu().numpy()
-        points2 = points.detach().cpu().numpy()
-        for pt1, pt2 in zip(points1, points2):
-            p1 = (int(round(pt1[0])), int(round(pt1[1])))
-            p2 = (int(round(pt2[0])), int(round(pt2[1])))
 
-            cv2.line(out, p1, p2, (0, 255, 0), lineType=16)
-            cv2.circle(out, p1, 1, (0, 0, 255), -1, lineType=16)
-            cv2.circle(out, p2, 1, (255, 0, 0), -1, lineType=16)
-        cv2.imshow("asdfasdfasdf123412341234", out)
-        cv2.waitKey(1)
-        """
 
     def extend_from_pcd(
-        self, fused_point_cloud, features, scales, rots, opacities, kf_id, isfeatures = None, observations = None
+        self, fused_point_cloud, features, scales, rots, opacities, kf_id, isfeatures = None, observations = None, global_ids = None
     ):
         new_xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         new_features_dc = nn.Parameter(
@@ -387,7 +294,8 @@ class GaussianOrbModel(GaussianModel):
             new_kf_ids=new_unique_kfIDs,
             new_n_obs=new_n_obs,
             new_isfeatures=isfeatures,
-            new_observations=observations
+            new_observations=observations,
+            new_global_ids = global_ids
         )
 
     def densification_postfix(
@@ -402,6 +310,7 @@ class GaussianOrbModel(GaussianModel):
         new_n_obs=None,
         new_isfeatures=None,
         new_observations=None,
+        new_global_ids=None,
     ):
         d = {
             "xyz": new_xyz,
@@ -431,6 +340,8 @@ class GaussianOrbModel(GaussianModel):
             self.isfeatured = torch.cat((self.isfeatured, new_isfeatures)).bool()
         if new_observations is not None:
             self.observations = np.concatenate((self.observations, new_observations))
+        if new_global_ids is not None:
+            self.unique_gaussian_ids = torch.cat((self.unique_gaussian_ids, new_global_ids)).long()
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
@@ -464,18 +375,14 @@ class GaussianOrbModel(GaussianModel):
 
         new_isfeatures = self.isfeatured[selected_pts_mask].repeat(N)
         new_observations = np.tile(self.observations[selected_pts_mask.cpu().numpy()],N)
-
         new_indices = torch.where(selected_pts_mask)[0].repeat(N)
-        Nold = self._xyz.size()[0]
 
-        #torch.set_printoptions(profile="full")
-        #np.set_printoptions(threshold=np.inf)
-        #print('bool',new_isfeatures)
-        #print('dict',new_observations)
-        #print('int',new_indices)
+        #global id
+        Nnew = new_isfeatures.size()[0]
+        old_gaussian = self.global_gaussian_counter
+        self.global_gaussian_counter += Nnew
+        new_global_ids = torch.arange(old_gaussian, self.global_gaussian_counter).cuda()
 
-        split_prune_feature = self.isfeatured[selected_pts_mask]
-        split_prune_obs = self.observations[selected_pts_mask.cpu().numpy()]
 
         self.densification_postfix(
             new_xyz,
@@ -487,7 +394,8 @@ class GaussianOrbModel(GaussianModel):
             new_kf_ids=new_kf_id,
             new_n_obs=new_n_obs,
             new_isfeatures=new_isfeatures,
-            new_observations=new_observations
+            new_observations=new_observations,
+            new_global_ids = new_global_ids
         )
 
         prune_filter = torch.cat(
@@ -496,11 +404,8 @@ class GaussianOrbModel(GaussianModel):
                 torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool),
             )
         )
-        #self.update_gaussian_observation_before_prune(prune_filter, frames)
         self.prune_points(prune_filter)
 
-        #print("repeat", new_indices.size() , prune_filter.size()," || ",N, Ns, torch.count_nonzero(selected_pts_mask), Nold, Nold + Ns, N2, self._xyz.size()[0],
-        #      torch.count_nonzero(new_isfeatures), np.count_nonzero(new_observations))
         return new_indices, prune_filter, new_isfeatures, new_observations
 
     def densify_and_clone(self, grads, grad_threshold, scene_extent):
@@ -527,8 +432,12 @@ class GaussianOrbModel(GaussianModel):
         new_isfeatures = self.isfeatured[selected_pts_mask]
         new_observations = self.observations[selected_pts_mask.cpu().numpy()]
 
-        Nold = self._xyz.size()[0]
         new_indices = torch.where(selected_pts_mask)[0]
+
+        Nnew = new_isfeatures.size()[0]
+        old_gaussian = self.global_gaussian_counter
+        self.global_gaussian_counter += Nnew
+        new_global_ids = torch.arange(old_gaussian, self.global_gaussian_counter).cuda()
 
         self.densification_postfix(
             new_xyz,
@@ -540,9 +449,9 @@ class GaussianOrbModel(GaussianModel):
             new_kf_ids=new_kf_id,
             new_n_obs=new_n_obs,
             new_isfeatures=new_isfeatures,
-            new_observations=new_observations
+            new_observations=new_observations,
+            new_global_ids = new_global_ids
         )
-        #print("clone",Nc, Nold, Nold+Nc, self._xyz.size()[0], torch.count_nonzero(new_isfeatures), np.count_nonzero(new_observations))
         return new_indices
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
@@ -555,7 +464,7 @@ class GaussianOrbModel(GaussianModel):
 
         clone_indices = self.densify_and_clone(grads, max_grad, extent)
         gaussians_indices = torch.cat((gaussians_indices, clone_indices)).int()
-        print("densify_and_prune::clone", gaussians_indices.size(), self._xyz.size()[0])
+        #print("densify_and_prune::clone", gaussians_indices.size(), self._xyz.size()[0])
 
         #mask 까지는 크기가 같고, 적용 후 크기가 달라야 함
         gaussian_features = self.isfeatured.clone()
@@ -566,7 +475,7 @@ class GaussianOrbModel(GaussianModel):
         gaussian_features = torch.cat((gaussian_features,split_features)).bool()
         gaussian_observation = numpy.concatenate((gaussian_observation, split_observations))
 
-        print("densify_and_prune::split", gaussians_indices.size(), split_filter.size(), self._xyz.size()[0])
+        #print("densify_and_prune::split", gaussians_indices.size(), split_filter.size(), self._xyz.size()[0])
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
@@ -577,36 +486,20 @@ class GaussianOrbModel(GaussianModel):
                 torch.logical_or(prune_mask, big_points_vs), big_points_ws
             )
 
-        #temp_prune_feature = self.isfeatured[prune_mask]
-        #temp_prune_obs = self.observations[prune_mask.cpu().numpy()]
-
-        #self.update_gaussian_observation_before_prune(prune_mask, frames)
         self.prune_points(prune_mask)
-
-        #prune obs
-        #temp_indices = torch.where(split_filter)[0] #
 
         #두 필터 합치기
         selected_indices = torch.where(~split_filter)[0]
         split_filter[selected_indices] = prune_mask
 
-        #print('equal features', torch.equal(gaussian_features[~split_filter], self.isfeatured))
-        #print('equal observation',numpy.equal(gaussian_observation[~split_filter.cpu().numpy()], self.observations))
-
-        #두 삭제 된 obs 합치기
-        ##fail
-        #temp_indices2 = torch.where(split_filter[selected_indices])[0]
-        #temp_prune_indices = torch.cat((temp_indices, temp_indices2))
-        #temp_prune_feature = torch.cat((split_prune_feature, temp_prune_feature))
-        #temp_prune_obs = np.concatenate((split_prune_obs,temp_prune_obs))
-
+        #prune 데이터 모으기
         temp_prune_indices = torch.where(split_filter)[0]
         temp_prune_feature = gaussian_features[split_filter]
         temp_prune_obs = gaussian_observation[split_filter.cpu().numpy()]
 
+        #이전 가우시안 또는 키프레임에서 새로 생성한 가우시안 중에서 수행
         prune_obs = {k.item(): v for k, v, b in zip(temp_prune_indices, temp_prune_obs, temp_prune_feature) if b and k < Nold}
-        #print('test', torch.count_nonzero(temp_prune_feature), np.count_nonzero(temp_prune_obs))
-        print('densify_and_prune::prune', Nold, len(prune_obs), gaussians_indices[~split_filter].size()[0],self._xyz.size()[0], temp_prune_indices.size()[0], torch.count_nonzero(split_filter), gaussians_indices[split_filter].size()[0])
+        #print('densify_and_prune::prune', Nold, len(prune_obs), gaussians_indices[~split_filter].size()[0],self._xyz.size()[0], temp_prune_indices.size()[0], torch.count_nonzero(split_filter), gaussians_indices[split_filter].size()[0])
         return gaussians_indices, split_filter, prune_obs
 
     def prune_points(self, mask):
@@ -629,6 +522,7 @@ class GaussianOrbModel(GaussianModel):
 
         self.isfeatured = self.isfeatured[valid_points_mask]
         self.observations = self.observations[valid_points_mask.cpu().numpy()]
+        self.unique_gaussian_ids = self.unique_gaussian_ids[valid_points_mask]
         #observation도 처리 필요
 
     """
