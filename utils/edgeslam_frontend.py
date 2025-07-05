@@ -79,7 +79,7 @@ class EdgeFrontEnd(WinFrontEnd):
         for kf_id, kf_R, kf_T in keyframes:
             self.cameras[kf_id].update_RT(kf_R.clone().to(self.device), kf_T.clone().to(self.device))
         for kf_id, gaussianpoints in frames:
-            self.frames[kf_id].gaussianpoints = gaussianpoints.cuda()
+            self.frames[kf_id].gaussianpoints = gaussianpoints.cuda().type(torch.int32)
             #self.frames[kf_id].inliers = self.frames[kf_id].gaussianpoints > -1
             #print(self.frames[kf_id])
 
@@ -775,7 +775,7 @@ class EdgeFrontEnd(WinFrontEnd):
                 points_reshaped = keypoints.reshape(-1, 1, 2)
                 undistorted = cv2.undistortPoints(points_reshaped, K, self.dataset.dist_coeffs, None, K)
                 curr_frame.keypoints = torch.from_numpy(undistorted.reshape(-1, 2)).cuda()
-                curr_frame.gaussianpoints = torch.full((curr_frame.keypoints.shape[0],),-1, device='cuda')
+                curr_frame.gaussianpoints = torch.full((curr_frame.keypoints.shape[0],),-1, dtype = torch.int32, device='cuda')
                 kp_time_end = time.time()
                 #print(frame.keypoints)
 
@@ -820,8 +820,10 @@ class EdgeFrontEnd(WinFrontEnd):
                 s = time.time()
 
                 if self.tracking_mode:
+                    print('frontend::observation', self.gaussians.observation_indices.shape, self.gaussians.observation_points.shape, self.current_window)
                     #matching with prev frame
                     match_time_start = time.time()
+                    """
                     prev_frame = self.frames[(prev_frame_idx)]
                     curr_index = torch.where((prev_frame.gaussianpoints > -1))[0].cpu().numpy() #(curr_frame.gaussianpoints > -1).numpy()#
                     cur_matches = self.testManager.tracker.match(prev_frame.descriptors[curr_index], curr_frame.descriptors)
@@ -834,6 +836,7 @@ class EdgeFrontEnd(WinFrontEnd):
                     kf_matches = self.testManager.tracker.match(last_keyframe.descriptors[kf_index], curr_frame.descriptors)
                     kf_matches[:, 0] = kf_index[kf_matches[:, 0]]
                     curr_frame.copy_gaussians_from_frame_matches(last_keyframe, self.gaussians, kf_matches)
+                    """
                     match_time_end = time.time()
 
                     render_pkg = self.tracking(cur_frame_idx, prev_frame_idx, viewpoint)

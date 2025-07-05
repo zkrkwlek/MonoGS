@@ -74,7 +74,9 @@ class GaussianOrbModel(GaussianModel):
         super().__init__(sh_degree, config)
 
         self.isfeatured = torch.empty(0, device="cuda").bool()
-        self.observations = np.full(0, None, dtype=object) #np dtype:object
+        self.observation_points = torch.empty((0,0), device="cuda").float()#np.full(0, None, dtype=object) #np dtype:object -> torch N x 2M 으로 변경
+        self.observation_indices = torch.empty(0, device='cuda').int()
+
         self.unique_gaussian_ids = torch.empty(0, device = "cuda").long()
         self.global_gaussian_counter = 0
 
@@ -181,13 +183,35 @@ class GaussianOrbModel(GaussianModel):
             temp_valid = temp_valid.cpu().numpy()
             new_xyz = np.concatenate((temp_backup_points[temp_valid], add_points), axis=0)
             new_rgb = np.concatenate((temp_backup_colors[temp_valid], add_colors),axis=0)
+
+            N1 = np.count_nonzero(temp_valid)
+            N2 = unique_keypoints.shape[0]
+            #Ncol = self.observations.shape[1]
+
+            temp_index = torch.where(match_index > -1)[0]
+            new_isfeature = torch.zeros(N1, device = 'cuda')
+            new_isfeature[temp_index] = True
+            new_isfeature = torch.cat((new_isfeature,torch.ones(N2, device='cuda')), axis = 0)
+            new_obs = torch.full((N1, 2), -1.0, device="cuda")
+            new_obs[temp_index] = keypoints[match_index[temp_index]]
+            #new_obs = torch.cat((new_obs, unique_keypoints), axis = 0)
+            new_obs = torch.cat((new_obs, keypoints[temp_unmatched_keypoints_index]), axis=0)
+
             match_index = torch.concatenate((match_index, temp_unmatched_keypoints_index), axis = 0)
 
-            matched_mask = match_index > -1
+            if N1 != new_obs.shape[0]:
+                print('err new gaussians : asdf', N1, temp_index.shape, temp_unmatched_keypoints_index.shape, torch.count_nonzero(temp_unmatched_keypoints_index > -1))
+            #print('bb',match_index.shape,new_xyz.shape, torch.count_nonzero(match_index > -1), torch.count_nonzero(new_obs > -1)/2)
+            #print('aa', temp_valid.shape, temp_backup_points[temp_valid].shape,temp_unmatched_keypoints_index.shape, temp_keypoints.shape)
+            #matched_mask = match_index > -1
 
         else:
             new_xyz = np.asarray(pcd_tmp.points)
             new_rgb = np.asarray(pcd_tmp.colors)
+
+            N1 = new_xyz.shape[0]
+            new_isfeature = torch.zeros(N1, device='cuda')
+            new_obs = torch.full((N1, 2), -1.0, device="cuda")
             match_index = torch.full((new_xyz.shape[0]),-1)
 
         pcd = BasicPointCloud(
@@ -224,8 +248,7 @@ class GaussianOrbModel(GaussianModel):
                 (fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"
             )
         )
-
-        return fused_point_cloud, features, scales, rots, opacities,match_index
+        return fused_point_cloud, features, scales, rots, opacities,new_isfeature, match_index, new_obs
 
     #frame 정보가 추가 전송
     def extend_from_pcd_seq(
@@ -237,19 +260,33 @@ class GaussianOrbModel(GaussianModel):
         else:
             keypoints =None
 
-        fused_point_cloud, features, scales, rots, opacities, match_index = (
+        fused_point_cloud, features, scales, rots, opacities, new_isfeature, tmp_new_observation_indices, new_observation_points = (
             self.create_pcd_from_image(cam_info, init, scale=scale, depthmap=depthmap, keypoints=keypoints)
         )
 
-        Nold = self._xyz.size()[0]
-        Nnew = fused_point_cloud.size()[0]
-        new_isfeature = torch.zeros(Nnew,device="cuda").bool()
-        new_observations = np.full(Nnew, None, dtype=object)
-
         # global gaussian id
+        Nnew = fused_point_cloud.size()[0]
+        Ncol1 = max(0, self.observation_indices.shape[1] - 1)
+        Ncol2 = max(0, self.observation_points.shape[1] - 2)
+        new_prev_obs_indices = torch.full((Nnew, Ncol1), -1, dtype = torch.int32, device = 'cuda')
+        tmp_new_observation_indices = tmp_new_observation_indices.type(torch.int32)
+        new_prev_obs_points = torch.full((Nnew, Ncol2), -1.0, device = 'cuda')
+        #print(new_prev_obs_points.shape, new_prev_obs_indices.shape, new_observation_indices.shape, new_observation_points.shape)
+
+        if new_prev_obs_indices.shape[0] != tmp_new_observation_indices.shape[0]:
+            print('err new gaussians', Nnew, tmp_new_observation_indices.shape)
+
+        new_observation_indices = torch.cat([new_prev_obs_indices, tmp_new_observation_indices.unsqueeze(1)], dim=1)
+        new_observation_points = torch.cat([new_prev_obs_points, new_observation_points], dim=1)
+
+        #print(new_observation_indices.shape, new_observation_points.shape)
         old_gaussian = self.global_gaussian_counter
         self.global_gaussian_counter += Nnew
         new_global_ids = torch.arange(old_gaussian, self.global_gaussian_counter).cuda()
+        Nold = self.get_xyz.shape[0]
+        """
+        new_isfeature = torch.zeros(Nnew,device="cuda").bool()
+        new_observations = np.full(Nnew, None, dtype=object)
 
         if frame is not None:
             for gauss_idx, point in enumerate(fused_point_cloud):
@@ -259,16 +296,23 @@ class GaussianOrbModel(GaussianModel):
                     new_isfeature[gauss_idx] = True
                     new_observations[gauss_idx] = {frame.id:kp_idx.item()}
                     #new_observations[gauss_idx][frame.id] = kp_idx.numpy()
+        """
+        if frame is not None:
+            idx = torch.where(tmp_new_observation_indices > -1)[0].type(torch.int32)
+            frame.gaussianpoints[tmp_new_observation_indices[idx]] = Nold+idx
 
         self.extend_from_pcd(
-            fused_point_cloud, features, scales, rots, opacities, kf_id, isfeatures=new_isfeature, observations=new_observations, global_ids=new_global_ids
+            fused_point_cloud, features, scales, rots, opacities, kf_id, isfeatures=new_isfeature,
+            observation_indices = new_observation_indices,
+            observation_points = new_observation_points,
+            global_ids=new_global_ids
         )
 
 
 
 
     def extend_from_pcd(
-        self, fused_point_cloud, features, scales, rots, opacities, kf_id, isfeatures = None, observations = None, global_ids = None
+        self, fused_point_cloud, features, scales, rots, opacities, kf_id, isfeatures = None, observation_indices = None, observation_points = None, global_ids = None
     ):
         new_xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         new_features_dc = nn.Parameter(
@@ -294,7 +338,8 @@ class GaussianOrbModel(GaussianModel):
             new_kf_ids=new_unique_kfIDs,
             new_n_obs=new_n_obs,
             new_isfeatures=isfeatures,
-            new_observations=observations,
+            new_observation_indices = observation_indices,
+            new_observation_points = observation_points,
             new_global_ids = global_ids
         )
 
@@ -309,7 +354,8 @@ class GaussianOrbModel(GaussianModel):
         new_kf_ids=None,
         new_n_obs=None,
         new_isfeatures=None,
-        new_observations=None,
+        new_observation_indices=None,
+        new_observation_points=None,
         new_global_ids=None,
     ):
         d = {
@@ -338,8 +384,10 @@ class GaussianOrbModel(GaussianModel):
             self.n_obs = torch.cat((self.n_obs, new_n_obs)).int()
         if new_isfeatures is not None:
             self.isfeatured = torch.cat((self.isfeatured, new_isfeatures)).bool()
-        if new_observations is not None:
-            self.observations = np.concatenate((self.observations, new_observations))
+        if new_observation_indices is not None:
+            self.observation_indices = torch.cat((self.observation_indices, new_observation_indices)).int()
+        if new_observation_points is not None:
+            self.observation_points = torch.cat((self.observation_points, new_observation_points)).float()
         if new_global_ids is not None:
             self.unique_gaussian_ids = torch.cat((self.unique_gaussian_ids, new_global_ids)).long()
 
@@ -374,7 +422,8 @@ class GaussianOrbModel(GaussianModel):
         new_n_obs = self.n_obs[selected_pts_mask.cpu()].repeat(N)
 
         new_isfeatures = self.isfeatured[selected_pts_mask].repeat(N)
-        new_observations = np.tile(self.observations[selected_pts_mask.cpu().numpy()],N)
+        new_observation_indices = self.observation_indices[selected_pts_mask].repeat(N,1)
+        new_observation_points = self.observation_points[selected_pts_mask].repeat(N,1)
         new_indices = torch.where(selected_pts_mask)[0].repeat(N)
 
         #global id
@@ -382,7 +431,6 @@ class GaussianOrbModel(GaussianModel):
         old_gaussian = self.global_gaussian_counter
         self.global_gaussian_counter += Nnew
         new_global_ids = torch.arange(old_gaussian, self.global_gaussian_counter).cuda()
-
 
         self.densification_postfix(
             new_xyz,
@@ -394,7 +442,8 @@ class GaussianOrbModel(GaussianModel):
             new_kf_ids=new_kf_id,
             new_n_obs=new_n_obs,
             new_isfeatures=new_isfeatures,
-            new_observations=new_observations,
+            new_observation_indices=new_observation_indices,
+            new_observation_points=new_observation_points,
             new_global_ids = new_global_ids
         )
 
@@ -406,7 +455,7 @@ class GaussianOrbModel(GaussianModel):
         )
         self.prune_points(prune_filter)
 
-        return new_indices, prune_filter, new_isfeatures, new_observations
+        return new_indices, prune_filter, new_isfeatures, new_observation_indices
 
     def densify_and_clone(self, grads, grad_threshold, scene_extent):
         # Extract points that satisfy the gradient condition
@@ -430,7 +479,8 @@ class GaussianOrbModel(GaussianModel):
         new_n_obs = self.n_obs[selected_pts_mask.cpu()]
 
         new_isfeatures = self.isfeatured[selected_pts_mask]
-        new_observations = self.observations[selected_pts_mask.cpu().numpy()]
+        new_observation_indices = self.observation_indices[selected_pts_mask]
+        new_observation_points = self.observation_points[selected_pts_mask]
 
         new_indices = torch.where(selected_pts_mask)[0]
 
@@ -449,7 +499,8 @@ class GaussianOrbModel(GaussianModel):
             new_kf_ids=new_kf_id,
             new_n_obs=new_n_obs,
             new_isfeatures=new_isfeatures,
-            new_observations=new_observations,
+            new_observation_indices = new_observation_indices,
+            new_observation_points = new_observation_points,
             new_global_ids = new_global_ids
         )
         return new_indices
@@ -468,13 +519,13 @@ class GaussianOrbModel(GaussianModel):
 
         #mask 까지는 크기가 같고, 적용 후 크기가 달라야 함
         gaussian_features = self.isfeatured.clone()
-        gaussian_observation = self.observations.copy()
+        gaussian_observation = self.observation_indices.clone()
         split_indices, split_filter, split_features, split_observations=self.densify_and_split(grads, max_grad, extent)
 
         gaussians_indices = torch.cat((gaussians_indices, split_indices)).int()
         gaussian_features = torch.cat((gaussian_features,split_features)).bool()
-        gaussian_observation = numpy.concatenate((gaussian_observation, split_observations))
-
+        gaussian_observation = torch.cat((gaussian_observation, split_observations))
+        #print(gaussian_observation.shape, gaussians_indices.shape)
         #print("densify_and_prune::split", gaussians_indices.size(), split_filter.size(), self._xyz.size()[0])
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
@@ -495,7 +546,7 @@ class GaussianOrbModel(GaussianModel):
         #prune 데이터 모으기
         temp_prune_indices = torch.where(split_filter)[0]
         temp_prune_feature = gaussian_features[split_filter]
-        temp_prune_obs = gaussian_observation[split_filter.cpu().numpy()]
+        temp_prune_obs = gaussian_observation[split_filter]
 
         #이전 가우시안 또는 키프레임에서 새로 생성한 가우시안 중에서 수행
         prune_obs = {k.item(): v for k, v, b in zip(temp_prune_indices, temp_prune_obs, temp_prune_feature) if b and k < Nold}
@@ -521,7 +572,8 @@ class GaussianOrbModel(GaussianModel):
         self.n_obs = self.n_obs[valid_points_mask.cpu()]
 
         self.isfeatured = self.isfeatured[valid_points_mask]
-        self.observations = self.observations[valid_points_mask.cpu().numpy()]
+        self.observation_indices = self.observation_indices[valid_points_mask]
+        self.observation_points = self.observation_points[valid_points_mask]
         self.unique_gaussian_ids = self.unique_gaussian_ids[valid_points_mask]
         #observation도 처리 필요
 

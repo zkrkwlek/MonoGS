@@ -41,6 +41,7 @@ class EdgeBackEnd(WinBackEnd):
         self.weight_depth = 0.02
         self.weight_ba = 0.03
         self.weight_patch = 0.15
+        self.next_kf_id = 0
 
     def push_to_frontend(self, tag=None, first_id = None, prune = None):
 
@@ -88,7 +89,14 @@ class EdgeBackEnd(WinBackEnd):
             self.backend_queue.get()
 
     def add_next_kf(self, frame_idx, viewpoint, init=False, scale=2.0, depth_map=None, frame=None):
-        self.update_gaussian_observation_with_frame(frame)
+        self.gaussians.observation_indices = torch.cat([self.gaussians.observation_indices,
+                                                        torch.full((self.gaussians.observation_indices.shape[0], 1),
+                                                                   -1, device='cuda')], dim=1)
+        self.gaussians.observation_points = torch.cat([self.gaussians.observation_points,
+                                                       torch.full((self.gaussians.observation_points.shape[0], 2), -1.0,
+                                                                  device='cuda')], dim=1)
+
+        #self.update_gaussian_observation_with_frame(frame)
 
         self.gaussians.extend_from_pcd_seq(
             viewpoint, kf_id=frame_idx, init=init, scale=scale, depthmap=depth_map,frame=frame
@@ -98,31 +106,54 @@ class EdgeBackEnd(WinBackEnd):
     def update_gaussian_observation_with_frame(self, frame):
 
         # keyframe index
+        id = frame.kf_id
         indices = torch.where(frame.gaussianpoints > -1)[0]
-
+        #if indices.shape[0] > 0:
+        #print(indices, frame.gaussianpoints[indices], self.gaussians.observation_indices.dtype, indices.dtype)
+        self.gaussians.observation_indices[frame.gaussianpoints[indices], id:id + 1] = indices.unsqueeze(1)
+        self.gaussians.observation_points[frame.gaussianpoints[indices], id*2:id*2+2] = frame.keypoints[indices]
+        self.gaussians.isfeatured[frame.gaussianpoints[indices]] = True
+        #print(id, self.gaussians.observation_indices.shape)
+        """
         for kp_idx in indices:
             g_idx = frame.gaussianpoints[kp_idx]
             self.gaussians.isfeatured[g_idx] = True
             if self.gaussians.observations[g_idx] is None:
                 self.gaussians.observations[g_idx] = {}
             self.gaussians.observations[g_idx][frame.id] = kp_idx.item()
+        """
 
     def update_gaussian_observation(self, prune_obs):
-
+        keys = list(self.frames)
+        """
         for idx, obs in prune_obs.items():
-            #print("aaaaa", idx, obs)
             if obs is not None:
-                for fid, kpidx in obs.items():
-                    #print('update gaussian', idx, fid, kpidx)
-                    self.frames[fid].gaussianpoints[kpidx] = -1
-
+                fids = torch.where(obs > -1)[0].cpu().numpy()
+                #print(fids.dtype, fids, obs, keys)
+                #print(keys[int(fids)],obs[int(fids)])
+                for fid, kp in zip(keys[fids], obs[fids]):
+                    #print(fid, kp)
+                    self.frames[fid].gaussianpoints[kp.itme()] = -1
+                #print(idx, obs, self.gaussians.observation_indices.shape)
+        """
 
     def update_gaussian_observation_after_prune(self):
         #print('update_gaussian_observation_after_prune',self.gaussians._xyz.size(), self.gaussians.isfeatured.size(), self.gaussians.observations.shape,torch.count_nonzero(self.gaussians.isfeatured), np.count_nonzero(self.gaussians.observations), np.sum(self.gaussians.observations!=None))
+
+        keys = list(self.frames)
+        for fid in keys:
+            frame = self.frames[fid]
+            kid = frame.kf_id
+            gids = torch.where(self.gaussians.observation_indices[:,kid] > -1)[0]
+            kpids = self.gaussians.observation_indices[gids, kid]
+            frame.gaussianpoints = torch.full((frame.keypoints.shape[0],),-1, device='cuda')
+            frame.gaussianpoints[kpids] = gids
+
+        """
         feature_indices = self.gaussians.isfeatured.clone().cpu().numpy()
         feature_indices = np.where(feature_indices)[0]
-        gaussian_obs = list(zip(feature_indices, self.gaussians.observations[feature_indices]))
-
+        gaussian_obs = list(zip(feature_indices, self.gaussians.observation_indices[feature_indices]))
+        
         for gaussian_index, obs in gaussian_obs:
             if obs is None:
                 print('obs error', gaussian_index, obs)
@@ -132,13 +163,75 @@ class EdgeBackEnd(WinBackEnd):
                 #print("update_gaussian frame", fid)
                 frame = self.frames[(fid)]
                 frame.gaussianpoints[kpidx] = gaussian_index
+        """
+    def update_graph(self, current_window, th = 9.0):
+        gaussian_indices = torch.where(self.gaussians.isfeatured)[0].cuda()
+        gaussians_xyz = self.gaussians.get_xyz[gaussian_indices]
+        obs_points = self.gaussians.observation_points[gaussian_indices]
+        obs_indices = self.gaussians.observation_indices[gaussian_indices]
+
+        for fid in current_window:
+            viewpoint = self.viewpoints[fid]
+            frame = self.frames[fid]
+            kid = frame.kf_id*2
+
+            idx = obs_indices[:, frame.kf_id] > -1
+            gaussians = gaussians_xyz[idx]
+            projection, valid = project_pc_to_pixel(gaussians, viewpoint.R, viewpoint.T,
+                                                    viewpoint.fx, viewpoint.fy, viewpoint.cx, viewpoint.cy,
+                                                    viewpoint.image_width, viewpoint.image_height)
+            points = obs_points[idx, kid:kid + 2][valid]
+
+            l2 = torch.sum((projection - points) ** 2, dim=1)
+            outlier = l2 > th
+
+            outlier_idx = gaussian_indices[idx][valid][outlier]
+            Noutlier = outlier_idx.shape[0]
+            self.gaussians.observation_indices[outlier_idx, frame.kf_id] = torch.full((Noutlier,  ), -1, device='cuda').type(torch.int32)
+            self.gaussians.observation_points[outlier_idx,  kid:kid + 2] = torch.full((Noutlier, 2), -1.0, device='cuda')
+
+        #outlier 관리
+        obs_indices2 = self.gaussians.observation_indices[gaussian_indices]+1
+        row_sum = obs_indices2.sum(dim=1)
+        mask = row_sum <= 0
+
+        if torch.count_nonzero(mask) > 0:
+            outlier_indices = gaussian_indices[mask]
+            n = torch.count_nonzero(mask)
+            self.gaussians.isfeatured[outlier_indices] = False#torch.zeros(n, device='cuda').bool()
+            print('outlier test', outlier_indices.shape, torch.count_nonzero(mask), mask.shape, gaussian_indices.shape)
+            """
+            print('outlier removal', n,
+                  torch.count_nonzero(self.gaussians.isfeatured[gaussian_indices][mask]),
+                  torch.count_nonzero(self.gaussians.observation_indices[gaussian_indices][mask] > -1),
+                  torch.count_nonzero(self.gaussians.observation_points[gaussian_indices][mask] > -1))
+            """
 
     def bundle_adjustment(self, current_window, th_obs = 2):
         t1 = time.time()
         gaussian_indices = torch.where(self.gaussians.isfeatured)[0].cuda()
-        gaussians = self.gaussians.get_xyz[gaussian_indices]
-        observations = self.gaussians.observations[gaussian_indices.cpu().numpy()]
+        gaussians_xyz = self.gaussians.get_xyz[gaussian_indices]
+        obs_points = self.gaussians.observation_points[gaussian_indices]
+        obs_indices = self.gaussians.observation_indices[gaussian_indices]
 
+        t2= time.time()
+        loss_ba = 0
+        for fid in current_window:
+            viewpoint = self.viewpoints[fid]
+            frame = self.frames[fid]
+            kid = frame.kf_id*2
+            idx = obs_indices[:,frame.kf_id] > -1
+            gaussians = gaussians_xyz[idx]
+            projection, valid = project_pc_to_pixel(gaussians, viewpoint.R, viewpoint.T,
+                                                    viewpoint.fx, viewpoint.fy, viewpoint.cx,
+                                                    viewpoint.cy,
+                                                    viewpoint.image_width, viewpoint.image_height)
+            points = obs_points[idx, kid:kid + 2][valid]
+
+            loss_ba += get_reprojection_loss(projection, points).mean()
+        t3 = time.time()
+        print("BA =", t2 - t1, t3 - t2, loss_ba, len(current_window))
+        """
         N = 0
         frame_data = defaultdict(lambda: {'xyzs': [], 'pts': []}) #'ids': [], 'count':0
         for gid, xyz, obs in zip(gaussian_indices, gaussians, observations):
@@ -178,10 +271,10 @@ class EdgeBackEnd(WinBackEnd):
                                                 viewpoint.cy,
                                                 viewpoint.image_width, viewpoint.image_height)
         t5 = time.time()
+        """
+        #print("BA =", t5-t4, t2-t1, t3-t2, t4-t3, loss_ba)
 
-        print("BA =", t5-t4, t2-t1, t3-t2, t4-t3, gaussians.size(), loss_ba)
-
-        return loss_ba,frame_data
+        return loss_ba
 
     def initialize_map(self, cur_frame_idx, viewpoint):
         t0 = time.time()
@@ -265,8 +358,9 @@ class EdgeBackEnd(WinBackEnd):
                             frame.gaussianpoints[kpidx] = gaussian_index
                     """
                     #여기서 삭제 된것 + 남은 것 갱신
-                    self.update_gaussian_observation(prune_obs)
+                    #self.update_gaussian_observation(prune_obs)
                     self.update_gaussian_observation_after_prune()
+
                     t9 = t9+time.time()
                     nPrune+=nPrune
                     #print("prune num test", Noldobs, len(prune_obs), torch.count_nonzero(self.gaussians.isfeatured))
@@ -337,12 +431,6 @@ class EdgeBackEnd(WinBackEnd):
 
             keyframes_opt = []
 
-            """ 
-            for cam_idx in range(len(current_window)):
-                keyframe = self.frames[(viewpoint.uid)]
-                keyframe.get_gaussians(self.gaussians)
-            """
-
             for cam_idx in range(len(current_window)):
                 viewpoint = viewpoint_stack[cam_idx]
                 keyframes_opt.append(viewpoint)
@@ -371,78 +459,6 @@ class EdgeBackEnd(WinBackEnd):
                     self.config, image, depth, viewpoint, opacity
                 )
                 loss_mapping += loss_rgb * self.weight_rgb + loss_depth * self.weight_depth
-                ##patch consistency
-                t_patch1 = time.time()
-
-                if False and doPatchConsistency:
-                    if viewpoint.uid == last_kf_id:
-                        keyframe = self.frames[viewpoint.uid]
-                        curr_rendered_image = image
-                        curr_patches, curr_patches_valid = keyframe.extract_patches_differentiable(image, keyframe.keypoints)
-
-                        """
-                        for cam_idx in current_window:
-                            if cam_idx == last_kf_id or cam_idx not in matches:
-                                continue
-                            match = matches[cam_idx]
-                            kf_val = kf_patches[cam_idx]['valid']
-                            curr_val = curr_patches_valid[match[:, 0]]
-                            valid = torch.logical_and(curr_val, kf_val)
-                            print(last_kf_id, cam_idx, valid.shape, torch.count_nonzero(valid), valid.device, match.shape, match.device)
-                            cur_patch = curr_patches[match[valid, 0]]
-                            kf_patch = kf_patches[cam_idx]['patch'][valid]
-
-                            loss_patch += F.mse_loss(cur_patch, kf_patch) * 0.05
-                            #loss_patch += torch.mean(cur_patch**2)
-                            #print('patch', last_kf_id, cam_idx, torch.count_nonzero(valid), valid.shape,cur_patch.shape)
-                        loss_mapping += loss_patch  # loss_patch.mean()*0.05
-                        t_patch2 = time.time()
-                        print('patch loss = ',  t_patch2 - t_patch1)
-                        """
-
-                if False and matches is not None and len(matches) > 0:
-                    loss_patch = 0
-                    if viewpoint.uid in matches:
-
-                        match = matches[viewpoint.uid]
-                        keyframe = self.frames[viewpoint.uid]
-
-                        if viewpoint.uid == last_kf_id:
-                            pass
-                        else:
-                            patches, valid = keyframe.extract_patches_differentiable(image, keyframe.keypoints[match[:,1]])
-                            kf_patches[kf_idx]
-                            """
-                            for idx1, idx2 in match:
-                                patch = keyframe.extract_patch_differentiable(image, keyframe.keypoints[idx2])
-                                if patch is not None:
-                                    loss_patch += torch.mean(patch ** 2)
-                            """
-                            t_patch2 = time.time()
-                            #after_grad_loss_patch = self.gaussians._xyz.grad.clone()
-                            #affected_by_patch1 = torch.any(before_grad_loss_patch != 0, dim=1)
-                            #affected_by_patch2 = torch.any(after_grad_loss_patch != 0, dim=1)
-                            #print("Gaussians affected by patch 1:", affected_by_patch1.nonzero().flatten())
-                            #print("Gaussians affected by patch 2:", affected_by_patch2.nonzero().flatten())
-                            #print("Overlap:", kf_idx, t_patch2-t_patch1, torch.logical_and(affected_by_patch1, affected_by_patch2).sum().item())
-                            print('patch', t_patch2-t_patch1, match.shape,torch.count_nonzero(valid), patches.shape, valid.shape)
-                        #print(self.gaussians._xyz.requires_grad)
-                ##patch consistency
-
-                ###reprojection error 추가
-                """
-                keyframe = self.frames[(viewpoint.uid)]
-                if keyframe is not None:
-                    projection, points, frame_valid,gaussiasn_indices = keyframe.get_correspondence(self.gaussians,viewpoint.R, viewpoint.T,
-                                                                       viewpoint.fx, viewpoint.fy, viewpoint.cx, viewpoint.cy,
-                                                                       viewpoint.image_width, viewpoint.image_height,
-                                                                     delta_rot=viewpoint.cam_rot_delta,
-                                                                     delta_trans=viewpoint.cam_trans_delta,
-                                                                     )
-                    err_reprojection = get_reprojection_loss(projection, points).mean()
-                    loss_mapping += err_reprojection*self.weight_reprojection
-                """
-                ###reprojection error 추가
 
                 viewspace_point_tensor_acm.append(viewspace_point_tensor)
                 visibility_filter_acm.append(visibility_filter)
@@ -476,20 +492,6 @@ class EdgeBackEnd(WinBackEnd):
                 )
                 loss_mapping += loss_rgb * self.weight_rgb + loss_depth * self.weight_depth
 
-                ###reprojection error 추가
-                """
-                keyframe = self.frames[(viewpoint.uid)]
-                if keyframe is not None:
-                    projection, points, _, _ = keyframe.get_correspondence(self.gaussians,viewpoint.R, viewpoint.T,
-                                                                     viewpoint.fx, viewpoint.fy, viewpoint.cx,viewpoint.cy,
-                                                                     viewpoint.image_width, viewpoint.image_height,
-                                                                     delta_rot=viewpoint.cam_rot_delta,
-                                                                     delta_trans=viewpoint.cam_trans_delta,
-                                                                     )
-                    loss_mapping += get_reprojection_loss(projection, points).mean()*self.weight_reprojection
-                """
-                ###reprojection error 추가
-
                 viewspace_point_tensor_acm.append(viewspace_point_tensor)
                 visibility_filter_acm.append(visibility_filter)
                 radii_acm.append(radii)
@@ -502,7 +504,7 @@ class EdgeBackEnd(WinBackEnd):
             """
 
             ##geometric consistency
-            loss_ba, local_map = self.bundle_adjustment(current_window)
+            loss_ba = self.bundle_adjustment(current_window)
             loss_mapping+=loss_ba*self.weight_ba
 
             if False and self.gaussians._xyz.grad is not None:
@@ -602,7 +604,7 @@ class EdgeBackEnd(WinBackEnd):
                                 self.occ_aware_visibility[current_idx] = (
                                     self.occ_aware_visibility[current_idx][~to_prune]
                                 )
-                            self.update_gaussian_observation(prune_obs)
+                            #self.update_gaussian_observation(prune_obs)
                             self.update_gaussian_observation_after_prune()
                         if not self.initialized:
                             self.initialized = True
@@ -630,7 +632,7 @@ class EdgeBackEnd(WinBackEnd):
                         self.gaussian_extent,
                         self.size_threshold,
                     )
-                    self.update_gaussian_observation(prune_obs)
+                    #self.update_gaussian_observation(prune_obs)
                     self.update_gaussian_observation_after_prune()
                     gaussian_split = True
 
@@ -656,6 +658,8 @@ class EdgeBackEnd(WinBackEnd):
                         continue
                     update_pose(viewpoint)
                 ##graph update
+                self.update_graph(current_window)
+
                 for cam_idx in range(len(current_window)):
                     viewpoint = viewpoint_stack[cam_idx]
                     keyframe = self.frames[(viewpoint.uid)]
@@ -796,6 +800,8 @@ class EdgeBackEnd(WinBackEnd):
 
                     f = data[4]
                     frame = EdgeFrame(cur_frame_idx, None, None, None)
+                    frame.kf_id = self.next_kf_id
+                    self.next_kf_id+=1
                     frame.keypoints, frame.descriptors, frame.gaussianpoints = f
                     frame.keypoints = frame.keypoints.cuda()
                     frame.gaussianpoints = frame.gaussianpoints.cuda()
@@ -832,11 +838,14 @@ class EdgeBackEnd(WinBackEnd):
 
                     f = data[5]
                     frame = EdgeFrame(cur_frame_idx, None, None, None)
+                    frame.kf_id = self.next_kf_id
+                    self.next_kf_id += 1
                     frame.keypoints, frame.descriptors, frame.gaussianpoints = f
                     frame.keypoints = frame.keypoints.cuda()
                     frame.gaussianpoints = frame.gaussianpoints.cuda()
                     self.frames[(cur_frame_idx)] = frame
 
+                    """
                     if prune_dict is not None:
                         for kpidx, gid in enumerate(frame.gaussianpoints):
                             gid = gid.item()
@@ -846,22 +855,86 @@ class EdgeBackEnd(WinBackEnd):
                                 frame.gaussianpoints[kpidx] = prune_dict[gid]
 
                         #print('frame equal test', np.equal(frame.gaussianpoints, self.frames[cur_frame_idx].gaussianpoints))
+                    """
                     Nold = self.gaussians._xyz.size()[0]
                     self.add_next_kf(cur_frame_idx, viewpoint, depth_map=depth_map, frame=frame)
 
                     ##add match and observation
                     #get_local_gaussians(self.gaussians, self.current_window)
                     t1 = time.time()
-                    temp_obs = self.gaussians.observations[self.gaussians.isfeatured.clone().cpu().numpy()]
+                    #temp_obs = self.gaussians.observations[self.gaussians.isfeatured.clone().cpu().numpy()]
                     a = time.time()
                     temp_kf_window = [x for x in current_window if x != cur_frame_idx]
                     kf_matches = {}
+                    new_kf_id = frame.kf_id
+
                     for kf_idx in temp_kf_window:
                         keyframe = self.frames[kf_idx]
+
                         matches = self.FeatureManager.tracker.match(frame.descriptors, keyframe.descriptors)
-                        matches = torch.from_numpy(matches).cuda()
+                        matches = torch.from_numpy(matches).type(torch.int32).cuda()
                         if matches.shape[0] > 20 :
                             kf_matches[kf_idx] = matches
+                            tt1 = time.time()
+
+                            kf_id = keyframe.kf_id
+
+                            ##새로운 가우시안 포인트에 기존 키프레임의 키포인트와 연결
+                            obs_idx_col = self.gaussians.observation_indices[:, new_kf_id]  # shape: (N,)
+                            match_values = matches[:, 0]  # shape: (K,)
+                            # eq[n, k] == True면 obs_idx_col[n] == match_values[k]
+                            # 위치: 포함되면 첫 번째 True의 인덱스, 없으면 -1
+                            # 인클루드 마스크는 가우시안에서 매칭(0)의 키포인트 위치. 즉 매치(0)과 같음., 가우시안 위치를 표현함.
+                            # 키포지션은 그게 매치 안에서 어디있는지를 알 수 있음.
+                            eq = obs_idx_col.unsqueeze(1) == match_values.unsqueeze(0)  # (N, K)
+                            key_positions = torch.where(eq.any(dim=1), eq.float().argmax(dim=1),
+                                                    torch.full_like(obs_idx_col, -1))
+                            included_mask = key_positions != -1
+
+                            frame_gaussian_index = torch.where(included_mask)[0]
+                            frame_match_index = key_positions[included_mask]
+
+                            self.gaussians.observation_indices[frame_gaussian_index, kf_id] = matches[frame_match_index, 1]
+                            self.gaussians.observation_points[frame_gaussian_index, kf_id * 2:kf_id * 2 + 2] = \
+                            keyframe.keypoints[matches[frame_match_index, 1]]
+
+                            ##기존의 가우시안 포인트에 새로운 키프레임의 키포인트와 연결
+                            obs_idx_col = self.gaussians.observation_indices[:, kf_id]  # shape: (N,)
+                            match_values = matches[:, 1]  # shape: (K,)
+
+                            eq = obs_idx_col.unsqueeze(1) == match_values.unsqueeze(0)  # (N, K)
+                            key_positions = torch.where(eq.any(dim=1), eq.float().argmax(dim=1),
+                                                        torch.full_like(obs_idx_col, -1))
+                            included_mask = key_positions != -1 #가우시안 수와 일치함.
+
+                            frame_gaussian_index = torch.where(included_mask)[0]
+                            frame_match_index = key_positions[included_mask]
+
+                            self.gaussians.observation_indices[frame_gaussian_index, new_kf_id] = matches[
+                                frame_match_index, 0]
+                            self.gaussians.observation_points[frame_gaussian_index, new_kf_id * 2:new_kf_id * 2 + 2] = \
+                                frame.keypoints[matches[frame_match_index, 0]]
+
+                            tt2 = time.time()
+                            print("aaa", kf_id,tt2-tt1, included_mask.shape, torch.count_nonzero(included_mask), key_positions.shape)
+                            #self.gaussians.observation_indices[:, new_kf_id].shape, frame_match_mask.shape, match_values.shape, torch.count_nonzero(frame_match_mask), torch.count_nonzero(frame_match_mask2), torch.count_nonzero(self.gaussians.observation_indices[:, new_kf_id] > -1))
+
+                            """
+                            tmp_valid = frame.gaussianpoints[matches[:,0]] > -1
+                            filtered_match = matches[tmp_valid]
+                            tmp_gaussian_idx = frame.gaussianpoints[filtered_match[:,0]]
+                            self.gaussians.observation_indices[tmp_gaussian_idx, kf_id] = filtered_match[:,1]
+                            self.gaussians.observation_points[tmp_gaussian_idx, kf_id*2:kf_id*2+2] = keyframe.keypoints[filtered_match[:,1]]
+
+                            tmp_valid2 = keyframe.gaussianpoints[matches[:, 1]] > -1
+                            filtered_match2 = matches[tmp_valid2]
+                            tmp_gaussian_idx2 = keyframe.gaussianpoints[filtered_match2[:, 1]]
+                            self.gaussians.observation_indices[tmp_gaussian_idx2, new_kf_id] = filtered_match2[:, 0]
+                            self.gaussians.observation_points[tmp_gaussian_idx2, new_kf_id * 2:new_kf_id * 2 + 2] = \
+                            frame.keypoints[filtered_match2[:, 0]]
+                            """
+                            #obs = self.gaussians.observations[,kf_id:kf_id+2]
+
                             """
                             for obs in temp_obs:
                                 fidx = -1;
@@ -877,14 +950,17 @@ class EdgeBackEnd(WinBackEnd):
                                     continue
                                     # print('test2', obs[cur_frame_idx])
                             """
+                            """
                             for idx1, idx2 in matches:
                                 if frame.gaussianpoints[idx1] >= 0:
                                     gidx = frame.gaussianpoints[idx1].item() #int
+                                    
                                     if kf_idx in self.gaussians.observations[gidx]:
                                         print("check", idx2, self.gaussians.observations[gidx][kf_idx])
                                     else:
                                         self.gaussians.observations[gidx][kf_idx] = idx2.item()
                                         #print(gidx, len(self.gaussians.observations[gidx]))
+                            """
                         print('backend::', kf_idx, torch.count_nonzero(keyframe.gaussianpoints > -1), keyframe.keypoints.size()[0])
 
 

@@ -11,6 +11,7 @@ from utils.pose_utils import SE3_exp
 class EdgeFrame:
     def __init__(self,id,color,R,t,depth=None):
         self.id = id
+        self.kf_id = -1
         self.color = color #수정 안함.
         self.depth = depth #수정 안함
 
@@ -21,9 +22,9 @@ class EdgeFrame:
         self.T[:3, 3] = t.flatten()  # 또는 M[:3, 3] = b.squeeze()
         self.T[3, 3] = 1.0
 
-        self.keypoints = None # np 수정 안함.
+        self.keypoints = None # np 수정 안함.-> gpu
         self.descriptors = None #np 수정 안함.
-        self.gaussianpoints = None #torch, cpu로 내려야 하나? 이것만 수정함. 이걸 통신하자.
+        self.gaussianpoints = None #torch, cpu로 내려야 하나? 이것만 수정함. 이걸 통신하자. # 이게 prune 후 frontend로 갈 때 prev, 아직 갱신 안된 키프레임도 처리되어야 함
         self.gaussians = None
         #self.inliers = None #전송안하면, 초기에 넘겨받고 갱신해야 함. 이것도 torch임.
 
@@ -93,7 +94,7 @@ class EdgeFrame:
 
     def copy_gaussians_from_frame_matches(self, frame, gaussians, matches):
         #self.gaussianpoints = torch.full((self.keypoints.shape[0],), -1)
-        matches = torch.from_numpy(matches).cuda()
+        matches = torch.from_numpy(matches).cuda().type(torch.int32)
         valid = frame.gaussianpoints[matches[:, 0]] > -1
         filted_matches = matches[valid, :]
         g_indices = frame.gaussianpoints[filted_matches[:, 0]]

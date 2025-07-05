@@ -205,7 +205,7 @@ def move_gaussianmodel_to_cpu(gaussians):
     # 주요 텐서 속성들
     tensor_attrs = [
         '_xyz', '_features_dc', '_features_rest', '_scaling', '_rotation', '_opacity',
-        'max_radii2D', 'xyz_gradient_accum', 'unique_kfIDs', 'n_obs', 'denom' ,'isfeatured','observations','unique_gaussian_ids'
+        'max_radii2D', 'xyz_gradient_accum', 'unique_kfIDs', 'n_obs', 'denom' ,'isfeatured','observation_indices','observation_points','unique_gaussian_ids'
     ]
 
     for attr in tensor_attrs:
@@ -225,7 +225,7 @@ def move_gaussianmodel_to_cpu(gaussians):
 def move_gaussianmodel_to_gpu(cpu_gaussians, device="cuda"):
     tensor_attrs = [
         '_xyz', '_features_dc', '_features_rest', '_scaling', '_rotation', '_opacity',
-        'max_radii2D', 'xyz_gradient_accum', 'unique_kfIDs', 'n_obs', 'denom', 'isfeatured','observations','unique_gaussian_ids'
+        'max_radii2D', 'xyz_gradient_accum', 'unique_kfIDs', 'n_obs', 'denom', 'isfeatured','observation_indices','observation_points','unique_gaussian_ids'
     ]
 
     for attr in tensor_attrs:
