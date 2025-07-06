@@ -45,14 +45,14 @@ class EdgeFrontEnd(WinFrontEnd):
     """"""
     def request_init(self, cur_frame_idx, viewpoint, depth_map):
         frame = self.frames[cur_frame_idx]
-        f = [frame.keypoints.cpu().clone(), frame.descriptors, frame.gaussianpoints.cpu().clone()]
+        f = [frame.keypoints.cpu().clone(), frame.descriptors]
         msg = ["init", cur_frame_idx, move_camera_to_cpu(viewpoint), depth_map, f]
         self.backend_queue.put(msg)
         self.requested_init = True
 
     def request_keyframe(self, cur_frame_idx, viewpoint, current_window, depthmap):
         frame = self.frames[cur_frame_idx]
-        f = [frame.keypoints.cpu().clone(), frame.descriptors, frame.gaussianpoints.cpu().clone()]
+        f = [frame.keypoints.cpu().clone(), frame.descriptors]
         msg = ["keyframe", cur_frame_idx, move_camera_to_cpu(viewpoint), (current_window), (depthmap),f]
         self.backend_queue.put(msg)
         self.requested_keyframe += 1
@@ -61,7 +61,7 @@ class EdgeFrontEnd(WinFrontEnd):
         gaussians = data[1]
         occ_aware_visibility = data[2]
         keyframes = data[3]
-        frames = data[4]
+
         move_gaussianmodel_to_gpu(gaussians)
         move_occ_visibility_to_gpu(occ_aware_visibility)
         #move_gaussians_to_gpu(keyframes)
@@ -78,13 +78,9 @@ class EdgeFrontEnd(WinFrontEnd):
 
         for kf_id, kf_R, kf_T in keyframes:
             self.cameras[kf_id].update_RT(kf_R.clone().to(self.device), kf_T.clone().to(self.device))
-        for kf_id, gaussianpoints in frames:
-            self.frames[kf_id].gaussianpoints = gaussianpoints.cuda().type(torch.int32)
-            #self.frames[kf_id].inliers = self.frames[kf_id].gaussianpoints > -1
-            #print(self.frames[kf_id])
 
         #update frame gaussianpoints
-        prune_dict = data[5]
+        prune_dict = data[4]
 
         if prune_dict is not None and prev_frame_idx is not None:
             last_kf_id = self.current_window[0]
@@ -94,6 +90,7 @@ class EdgeFrontEnd(WinFrontEnd):
                 frame = self.frames[fid]
                 #frame.gaussianpoints = torch.full((frame.keypoints.shape[0],),-1)
 
+                """
                 for kpidx, gid in enumerate(frame.gaussianpoints):
                     gid = gid.item()
                     if gid == -1:
@@ -102,7 +99,7 @@ class EdgeFrontEnd(WinFrontEnd):
                         frame.gaussianpoints[kpidx] = prune_dict[gid]
                         #if prune_dict[gid] == -1:
                         #    frame.inliers[kpidx] = False
-
+                """
 
             """
             mask = [
@@ -775,7 +772,7 @@ class EdgeFrontEnd(WinFrontEnd):
                 points_reshaped = keypoints.reshape(-1, 1, 2)
                 undistorted = cv2.undistortPoints(points_reshaped, K, self.dataset.dist_coeffs, None, K)
                 curr_frame.keypoints = torch.from_numpy(undistorted.reshape(-1, 2)).cuda()
-                curr_frame.gaussianpoints = torch.full((curr_frame.keypoints.shape[0],),-1, dtype = torch.int32, device='cuda')
+
                 kp_time_end = time.time()
                 #print(frame.keypoints)
 
@@ -961,7 +958,7 @@ class EdgeFrontEnd(WinFrontEnd):
                     gtsam_t2 = time.time()
 
                     #print("Optimized Camera Pose:\n", rvec,tvec, gtsam_t2-gtsam_t1)
-
+                    """
                     projection, points, gaussians, _ = curr_frame.update_gaussianpoints(self.gaussians, viewpoint.R,
                         viewpoint.T,
                         viewpoint.fx, viewpoint.fy,
@@ -969,9 +966,10 @@ class EdgeFrontEnd(WinFrontEnd):
                         viewpoint.image_width,
                         viewpoint.image_height,
                     )
+                    """
                     frame_end_time = time.time()
                     #print('tracking', cur_frame_idx, projection.size()[0], kp_time_end-kp_time_start, kp_time_end-kp_time_temp, frame_end_time-frame_start_time, match_time_end-match_time_start, gtsam_t2-gtsam_t1)
-                    self.testManager.tracker.visualize2(curr_frame.color, projection, points, delay = 10, save=True, filename='./res/'+str(cur_frame_idx)+'.jpg')
+                    #self.testManager.tracker.visualize2(curr_frame.color, projection, points, delay = 10, save=True, filename='./res/'+str(cur_frame_idx)+'.jpg')
 
                     #prev = self.cameras[prev_frame_idx]
 

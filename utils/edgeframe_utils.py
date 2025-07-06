@@ -24,8 +24,9 @@ class EdgeFrame:
 
         self.keypoints = None # np 수정 안함.-> gpu
         self.descriptors = None #np 수정 안함.
-        self.gaussianpoints = None #torch, cpu로 내려야 하나? 이것만 수정함. 이걸 통신하자. # 이게 prune 후 frontend로 갈 때 prev, 아직 갱신 안된 키프레임도 처리되어야 함
-        self.gaussians = None
+
+        #self.gaussianpoints = None #torch, cpu로 내려야 하나? 이것만 수정함. 이걸 통신하자. # 이게 prune 후 frontend로 갈 때 prev, 아직 갱신 안된 키프레임도 처리되어야 함
+        #self.gaussians = None
         #self.inliers = None #전송안하면, 초기에 넘겨받고 갱신해야 함. 이것도 torch임.
 
     def extract_patches_differentiable(self, image, center_pts, patch_size=7):
@@ -93,6 +94,7 @@ class EdgeFrame:
         return err < th
 
     def copy_gaussians_from_frame_matches(self, frame, gaussians, matches):
+        """
         #self.gaussianpoints = torch.full((self.keypoints.shape[0],), -1)
         matches = torch.from_numpy(matches).cuda().type(torch.int32)
         valid = frame.gaussianpoints[matches[:, 0]] > -1
@@ -101,6 +103,8 @@ class EdgeFrame:
         self.gaussianpoints[filted_matches[:,1]] = g_indices
         #가우시안 포인트 복사
         #추후 옵저베이션 추가
+        """
+        pass
 
     def get_gaussianpoints(self, gaussians, R, t, fx, fy, cx, cy, w, h, th_radius = 9.0):
 

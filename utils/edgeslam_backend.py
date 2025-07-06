@@ -47,19 +47,10 @@ class EdgeBackEnd(WinBackEnd):
 
         self.last_sent = 0
         keyframes = []
-        frames = []
+
         for kf_idx in self.current_window:
             kf = self.viewpoints[kf_idx]
             keyframes.append((kf_idx, kf.R.clone().cpu(), kf.T.clone().cpu()))
-
-        #처음 가우시안 포인트 전송 용
-        if first_id is not None:
-            self.current_window.append(first_id)
-        for kf_idx in self.current_window:
-            f = self.frames[kf_idx]
-            frames.append((kf_idx, f.gaussianpoints.cpu().clone()))
-        if first_id is not None:
-            self.current_window = []
 
         if tag is None:
             tag = "sync_backend"
@@ -68,7 +59,7 @@ class EdgeBackEnd(WinBackEnd):
         if prune is not None:
             prune_data = prune
         #print("push_to_frontend::end", len(frames))
-        msg = [tag, move_gaussianmodel_to_cpu(self.gaussians), move_occ_visibility_to_cpu(self.occ_aware_visibility), (keyframes), (frames), (prune_data)]
+        msg = [tag, move_gaussianmodel_to_cpu(self.gaussians), move_occ_visibility_to_cpu(self.occ_aware_visibility), (keyframes), (prune_data)]
         self.frontend_queue.put(msg)
 
     def reset(self):
@@ -104,7 +95,8 @@ class EdgeBackEnd(WinBackEnd):
         return
 
     def update_gaussian_observation_with_frame(self, frame):
-
+        pass
+        """
         # keyframe index
         id = frame.kf_id
         indices = torch.where(frame.gaussianpoints > -1)[0]
@@ -114,6 +106,7 @@ class EdgeBackEnd(WinBackEnd):
         self.gaussians.observation_points[frame.gaussianpoints[indices], id*2:id*2+2] = frame.keypoints[indices]
         self.gaussians.isfeatured[frame.gaussianpoints[indices]] = True
         #print(id, self.gaussians.observation_indices.shape)
+        """
         """
         for kp_idx in indices:
             g_idx = frame.gaussianpoints[kp_idx]
@@ -139,7 +132,8 @@ class EdgeBackEnd(WinBackEnd):
 
     def update_gaussian_observation_after_prune(self):
         #print('update_gaussian_observation_after_prune',self.gaussians._xyz.size(), self.gaussians.isfeatured.size(), self.gaussians.observations.shape,torch.count_nonzero(self.gaussians.isfeatured), np.count_nonzero(self.gaussians.observations), np.sum(self.gaussians.observations!=None))
-
+        pass
+        """
         keys = list(self.frames)
         for fid in keys:
             frame = self.frames[fid]
@@ -148,6 +142,8 @@ class EdgeBackEnd(WinBackEnd):
             kpids = self.gaussians.observation_indices[gids, kid]
             frame.gaussianpoints = torch.full((frame.keypoints.shape[0],),-1, device='cuda')
             frame.gaussianpoints[kpids] = gids
+        """
+
 
         """
         feature_indices = self.gaussians.isfeatured.clone().cpu().numpy()
@@ -664,16 +660,6 @@ class EdgeBackEnd(WinBackEnd):
                     viewpoint = viewpoint_stack[cam_idx]
                     keyframe = self.frames[(viewpoint.uid)]
 
-                    projection, points, keypoint_index, gaussian_index = keyframe.get_correspondence(self.gaussians, viewpoint.R, viewpoint.T,
-                        viewpoint.fx, viewpoint.fy, viewpoint.cx,viewpoint.cy,
-                        viewpoint.image_width, viewpoint.image_height,
-                        delta_rot=viewpoint.cam_rot_delta,
-                        delta_trans=viewpoint.cam_trans_delta,
-                        )
-                    inlier = keyframe.update_outlier_points(projection,points,None)
-                    projection = projection[inlier]
-                    points= points[inlier]
-
                     #print(torch.count_nonzero(inlier), inlier.device, gaussian_index.size())
                     """
                     keyframe.gaussianpoints[keypoint_index[~inlier]] = -1
@@ -802,9 +788,8 @@ class EdgeBackEnd(WinBackEnd):
                     frame = EdgeFrame(cur_frame_idx, None, None, None)
                     frame.kf_id = self.next_kf_id
                     self.next_kf_id+=1
-                    frame.keypoints, frame.descriptors, frame.gaussianpoints = f
+                    frame.keypoints, frame.descriptors = f
                     frame.keypoints = frame.keypoints.cuda()
-                    frame.gaussianpoints = frame.gaussianpoints.cuda()
                     #frame.gaussianpoints = torch.from_numpy(gaussianpoints)
 
                     move_camera_to_gpu(viewpoint)
@@ -840,9 +825,8 @@ class EdgeBackEnd(WinBackEnd):
                     frame = EdgeFrame(cur_frame_idx, None, None, None)
                     frame.kf_id = self.next_kf_id
                     self.next_kf_id += 1
-                    frame.keypoints, frame.descriptors, frame.gaussianpoints = f
+                    frame.keypoints, frame.descriptors = f
                     frame.keypoints = frame.keypoints.cuda()
-                    frame.gaussianpoints = frame.gaussianpoints.cuda()
                     self.frames[(cur_frame_idx)] = frame
 
                     """
@@ -961,7 +945,7 @@ class EdgeBackEnd(WinBackEnd):
                                         self.gaussians.observations[gidx][kf_idx] = idx2.item()
                                         #print(gidx, len(self.gaussians.observations[gidx]))
                             """
-                        print('backend::', kf_idx, torch.count_nonzero(keyframe.gaussianpoints > -1), keyframe.keypoints.size()[0])
+                        print('backend::', kf_idx)#, torch.count_nonzero(keyframe.gaussianpoints > -1), keyframe.keypoints.size()[0])
 
 
 
@@ -1061,6 +1045,8 @@ class EdgeBackEnd(WinBackEnd):
                         self.push_to_frontend("keyframe")
                     e2 = time.time()
 
+                    ##frame visualization
+                    """
                     for kf_idx in temp_kf_window:
                         if kf_idx in kf_matches:
                             matches = kf_matches[kf_idx]
@@ -1083,7 +1069,7 @@ class EdgeBackEnd(WinBackEnd):
                             self.FeatureManager.tracker.visualize2(image_np, projection.clone(), points.clone(), delay=1
                                    , save=True,
                                    filename='./res/map/mapping_' + str(cur_frame_idx) + '_' + str(kf_idx) + '.jpg')
-
+                    """
 
                 else:
                     raise Exception("Unprocessed data", data)
