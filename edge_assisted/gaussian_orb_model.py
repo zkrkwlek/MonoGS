@@ -23,7 +23,7 @@ from gaussian_splatting.utils.general_utils import (
 from gaussian_splatting.utils.graphics_utils import BasicPointCloud, getWorld2View2
 from gaussian_splatting.utils.sh_utils import RGB2SH
 
-from edge_assisted.gaussian_feature import project_pc_to_pixel, visualize_pc,convert_xyz, pixels_to_pc,find_correspondence
+from edge_assisted.gaussian_feature import calculate_feature_mask,calculate_bbox_mask, project_pc_to_pixel, visualize_pc,convert_xyz, pixels_to_pc,find_correspondence
 from edge_assisted.gaussian_feature import GaussianPointManager
 
 ###일단 densification 같은 것에 대응하는지 확인
@@ -52,7 +52,7 @@ class GaussianOrbModel(GaussianModel):
 
         return new_gaussians
 
-    def create_pcd_from_image(self, cam_info, init=False, scale=2.0, depthmap=None, keypoints=None):
+    def create_pcd_from_image(self, cam_info, init=False, scale=2.0, depthmap=None, keypoints=None, boxes = None):
         cam = cam_info
         image_ab = (torch.exp(cam.exposure_a)) * cam.original_image + cam.exposure_b
         image_ab = torch.clamp(image_ab, 0.0, 1.0)
@@ -76,9 +76,15 @@ class GaussianOrbModel(GaussianModel):
             rgb = o3d.geometry.Image(rgb_raw.astype(np.uint8))
             depth = o3d.geometry.Image(depth_raw.astype(np.float32))
 
-        return self.create_pcd_from_image_and_depth(cam, rgb, depth, init,keypoints=keypoints)
+        if keypoints is not None:
+            pass
 
-    def create_pcd_from_image_and_depth(self, cam, rgb, depth, init=False, keypoints=None):
+        if boxes is not None:
+            pass
+
+        return self.create_pcd_from_image_and_depth(cam, rgb, depth, init,keypoints=keypoints, boxes = boxes)
+
+    def create_pcd_from_image_and_depth(self, cam, rgb, depth, init=False, keypoints=None, boxes = None):
         if init:
             downsample_factor = self.config["Dataset"]["pcd_downsample_init"]
         else:
@@ -96,6 +102,32 @@ class GaussianOrbModel(GaussianModel):
         )
 
         W2C = getWorld2View2(cam.R, cam.T).cpu().numpy()
+
+        if boxes is not None:
+            mask = calculate_bbox_mask(boxes, cam.image_width, cam.image_height)
+            rgbd_object = o3d.geometry.RGBDImage.create_from_color_and_depth(
+                rgb,
+                depth[mask],
+                depth_scale=1.0,
+                depth_trunc=100.0,
+                convert_rgb_to_intensity=False,
+            )
+
+            pcd_tmp_object = o3d.geometry.PointCloud.create_from_rgbd_image(
+                rgbd_object,
+                o3d.camera.PinholeCameraIntrinsic(
+                    cam.image_width,
+                    cam.image_height,
+                    cam.fx,
+                    cam.fy,
+                    cam.cx,
+                    cam.cy,
+                ),
+                extrinsic=W2C,
+                project_valid_depth_only=True,
+            )
+            print('object test', pcd_tmp_object.shape, torch.count_nonzero(mask))
+
         pcd_tmp = o3d.geometry.PointCloud.create_from_rgbd_image(
             rgbd,
             o3d.camera.PinholeCameraIntrinsic(
@@ -115,25 +147,56 @@ class GaussianOrbModel(GaussianModel):
         pcd_tmp = pcd_tmp.random_down_sample(1.0 / downsample_factor)
 
         if keypoints is not None:
+
+            mask = calculate_feature_mask(keypoints, cam.image_width, cam.image_height, radius=1)
+            rgbd_feature = o3d.geometry.RGBDImage.create_from_color_and_depth(
+                rgb,
+                depth[mask],
+                depth_scale=1.0,
+                depth_trunc=100.0,
+                convert_rgb_to_intensity=False,
+            )
+
+            pcm_tmp_feature = o3d.geometry.PointCloud.create_from_rgbd_image(
+                rgbd_feature,
+                o3d.camera.PinholeCameraIntrinsic(
+                    cam.image_width,
+                    cam.image_height,
+                    cam.fx,
+                    cam.fy,
+                    cam.cx,
+                    cam.cy,
+                ),
+                extrinsic=W2C,
+                project_valid_depth_only=True,
+            )
+            print('feature test', pcm_tmp_feature.shape, torch.count_nonzero(mask))
+
+
             #프로젝션
             #키포인트 없으면 추가
             #temp_keypoints =torch.round(torch.from_numpy(np.asarray(keypoints)).cuda()).int()
+            #temp_backup_points는 pcd로 생성한 포인트
             temp_keypoints = torch.round(keypoints).int()
             temp_backup_points = np.asarray(pcd_tmp.points)
             temp_backup_colors = np.asarray(pcd_tmp.colors)
 
+            #temp_valid는 temp_backup_points에서 이미지 안의 포인트를 의미함. = pcd의 수보다 작을 수 있음.
             temp_points=torch.from_numpy(temp_backup_points).cuda()
-            temp_points, temp_valid = project_pc_to_pixel(temp_points, cam.R, cam.T, cam.fx, cam.fy, cam.cx, cam.cy, cam.image_width, cam.image_height)
-            temp_points = torch.round(temp_points).int()
+            temp_points, _, temp_valid = project_pc_to_pixel(temp_points, cam.R, cam.T, cam.fx, cam.fy, cam.cx, cam.cy, cam.image_width, cam.image_height)
+            temp_points = torch.round(temp_points[temp_valid]).int()
 
             rgb = torch.from_numpy(np.asarray(rgb)).cuda()
             depth = torch.from_numpy(np.asarray(depth)).cuda()
 
             #새로 생성하는 gaussian 포인트에서 매칭 대응쌍, 키포인트에서 매칭 안된 index mask
+            #pcd와 키포인트 중 매치 된 포인트와 안된 키포인트를 의미
+            #유니크 키포인트는 매치가 안된 키포인트임.
             match_index, unmatch_mask = find_correspondence(temp_points, temp_keypoints)
             unique_keypoints = temp_keypoints[unmatch_mask]
             temp_unmatched_keypoints_index = torch.arange(0,unmatch_mask.size()[0]).cuda()[unmatch_mask]
 
+            #매치 안된 유니크 키포인트 만큼 추가
             add_points, add_colors, valid_depth_mask = convert_xyz(unique_keypoints, rgb, depth)
             add_points = pixels_to_pc(add_points, cam.R, cam.T, cam.fx, cam.fy, cam.cx, cam.cy)
 
@@ -144,23 +207,35 @@ class GaussianOrbModel(GaussianModel):
             new_xyz = np.concatenate((temp_backup_points[temp_valid], add_points), axis=0)
             new_rgb = np.concatenate((temp_backup_colors[temp_valid], add_colors),axis=0)
 
-            N1 = np.count_nonzero(temp_valid)
-            N2 = unique_keypoints.shape[0]
+            N1 = np.count_nonzero(temp_valid) #기존에 랜덤하게 생성된 포인트
+            N2 = torch.count_nonzero(valid_depth_mask)#unique_keypoints.shape[0]    #랜덤 생성된 값을 제외한 키포인트
             #Ncol = self.observations.shape[1]
 
-            temp_index = torch.where(match_index > -1)[0]
+
+            #그리고 pcd로 생성된 수와 같아야 함. 그 중에서 temp_valid가 true인 애들
+            #isfeature, obs, match_index를 추가해야 함. 그 수는 유니크 키포인트와 같음.
+            #add_point에서 valid_mask를 고려해야 할 듯. 이게 가끔 에러가 있음.
+            temp_index = torch.where(match_index > -1)[0] #매칭 된 결과값
+
             new_isfeature = torch.zeros(N1, device = 'cuda')
             new_isfeature[temp_index] = True
-            new_isfeature = torch.cat((new_isfeature,torch.ones(N2, device='cuda')), axis = 0)
+
+            #기존 pcd 데이터
             new_obs = torch.full((N1, 2), -1.0, device="cuda")
             new_obs[temp_index] = keypoints[match_index[temp_index]]
-            #new_obs = torch.cat((new_obs, unique_keypoints), axis = 0)
-            new_obs = torch.cat((new_obs, keypoints[temp_unmatched_keypoints_index]), axis=0)
 
+            temp_unmatched_keypoints_index = temp_unmatched_keypoints_index[valid_depth_mask]
+            new_isfeature = torch.cat((new_isfeature,torch.ones(N2, device='cuda')), axis = 0)
+            new_obs = torch.cat((new_obs, keypoints[temp_unmatched_keypoints_index]), axis=0)
             match_index = torch.concatenate((match_index, temp_unmatched_keypoints_index), axis = 0)
 
-            if N1 != new_obs.shape[0]:
-                print('err new gaussians : asdf', N1, temp_index.shape, temp_unmatched_keypoints_index.shape, torch.count_nonzero(temp_unmatched_keypoints_index > -1))
+            if new_obs.shape[0] != new_xyz.shape[0]:
+                print('new gaussian error case', new_obs.shape[0], match_index.shape[0], new_isfeature.shape[0])
+                print(torch.count_nonzero(valid_depth_mask),add_points.shape[0],temp_unmatched_keypoints_index.shape[0])
+
+            #if N1 != new_obs.shape[0]:
+            #    print('err new gaussians : asdf', N1, new_obs.shape, temp_index.shape, temp_unmatched_keypoints_index.shape, torch.count_nonzero(temp_unmatched_keypoints_index > -1))
+
             #print('bb',match_index.shape,new_xyz.shape, torch.count_nonzero(match_index > -1), torch.count_nonzero(new_obs > -1)/2)
             #print('aa', temp_valid.shape, temp_backup_points[temp_valid].shape,temp_unmatched_keypoints_index.shape, temp_keypoints.shape)
             #matched_mask = match_index > -1
@@ -208,6 +283,8 @@ class GaussianOrbModel(GaussianModel):
                 (fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"
             )
         )
+        if new_xyz.shape[0] != fused_point_cloud.shape[0]:
+            print('error new gaussian', new_xyz.shape, fused_point_cloud.shape)
         return fused_point_cloud, features, scales, rots, opacities,new_isfeature, match_index, new_obs
 
     #frame 정보가 추가 전송
@@ -219,9 +296,13 @@ class GaussianOrbModel(GaussianModel):
             keypoints = frame.keypoints
         else:
             keypoints =None
+        if len(frame.objects) == 0:
+            boxes = None
+        else:
+            boxes = torch.tensor(list(frame.objects.values()), device='cuda')
 
         fused_point_cloud, features, scales, rots, opacities, new_isfeature, tmp_new_observation_indices, new_observation_points = (
-            self.create_pcd_from_image(cam_info, init, scale=scale, depthmap=depthmap, keypoints=keypoints)
+            self.create_pcd_from_image(cam_info, init, scale=scale, depthmap=depthmap, keypoints=keypoints, boxes = boxes)
         )
 
         # global gaussian id
@@ -234,7 +315,7 @@ class GaussianOrbModel(GaussianModel):
         #print(new_prev_obs_points.shape, new_prev_obs_indices.shape, new_observation_indices.shape, new_observation_points.shape)
 
         if new_prev_obs_indices.shape[0] != tmp_new_observation_indices.shape[0]:
-            print('err new gaussians', Nnew, tmp_new_observation_indices.shape)
+            print('err new gaussians bbbb', Nnew, tmp_new_observation_indices.shape)
 
         new_observation_indices = torch.cat([new_prev_obs_indices, tmp_new_observation_indices.unsqueeze(1)], dim=1)
         new_observation_points = torch.cat([new_prev_obs_points, new_observation_points], dim=1)
@@ -381,7 +462,6 @@ class GaussianOrbModel(GaussianModel):
         new_isfeatures = self.isfeatured[selected_pts_mask].repeat(N)
         new_observation_indices = self.observation_indices[selected_pts_mask].repeat(N,1)
         new_observation_points = self.observation_points[selected_pts_mask].repeat(N,1)
-        new_indices = torch.where(selected_pts_mask)[0].repeat(N)
 
         #global id
         Nnew = new_isfeatures.size()[0]
@@ -410,11 +490,12 @@ class GaussianOrbModel(GaussianModel):
                 torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool),
             )
         )
+        remove_split_ids = self.unique_gaussian_ids[prune_filter]
         self.prune_points(prune_filter)
 
-        return new_indices, prune_filter, new_isfeatures, new_observation_indices
+        return remove_split_ids
 
-    def densify_and_clone(self, grads, grad_threshold, scene_extent):
+    def  densify_and_clone(self, grads, grad_threshold, scene_extent):
         # Extract points that satisfy the gradient condition
         selected_pts_mask = torch.where(
             torch.norm(grads, dim=-1) >= grad_threshold, True, False
@@ -439,8 +520,6 @@ class GaussianOrbModel(GaussianModel):
         new_observation_indices = self.observation_indices[selected_pts_mask]
         new_observation_points = self.observation_points[selected_pts_mask]
 
-        new_indices = torch.where(selected_pts_mask)[0]
-
         Nnew = new_isfeatures.size()[0]
         old_gaussian = self.global_gaussian_counter
         self.global_gaussian_counter += Nnew
@@ -460,30 +539,18 @@ class GaussianOrbModel(GaussianModel):
             new_observation_points = new_observation_points,
             new_global_ids = new_global_ids
         )
-        return new_indices
+        return
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
 
-        gaussians_indices = torch.arange(self._xyz.size()[0]).cuda()
         Nold = self._xyz.size()[0]
 
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
-        clone_indices = self.densify_and_clone(grads, max_grad, extent)
-        gaussians_indices = torch.cat((gaussians_indices, clone_indices)).int()
-        #print("densify_and_prune::clone", gaussians_indices.size(), self._xyz.size()[0])
+        self.densify_and_clone(grads, max_grad, extent)
 
-        #mask 까지는 크기가 같고, 적용 후 크기가 달라야 함
-        gaussian_features = self.isfeatured.clone()
-        gaussian_observation = self.observation_indices.clone()
-        split_indices, split_filter, split_features, split_observations=self.densify_and_split(grads, max_grad, extent)
-
-        gaussians_indices = torch.cat((gaussians_indices, split_indices)).int()
-        gaussian_features = torch.cat((gaussian_features,split_features)).bool()
-        gaussian_observation = torch.cat((gaussian_observation, split_observations))
-        #print(gaussian_observation.shape, gaussians_indices.shape)
-        #print("densify_and_prune::split", gaussians_indices.size(), split_filter.size(), self._xyz.size()[0])
+        split_ids =self.densify_and_split(grads, max_grad, extent)
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
@@ -493,22 +560,16 @@ class GaussianOrbModel(GaussianModel):
             prune_mask = torch.logical_or(
                 torch.logical_or(prune_mask, big_points_vs), big_points_ws
             )
-
+        ## remove gaussian ids
+        removed_ids = self.unique_gaussian_ids[prune_mask]
+        removed_ids = torch.cat((split_ids, removed_ids), axis = 0)
         self.prune_points(prune_mask)
 
-        #두 필터 합치기
-        selected_indices = torch.where(~split_filter)[0]
-        split_filter[selected_indices] = prune_mask
+        ##test
+        #aa = torch.isin(self.unique_gaussian_ids, removed_ids)
+        #print('aa',torch.count_nonzero(aa))
 
-        #prune 데이터 모으기
-        temp_prune_indices = torch.where(split_filter)[0]
-        temp_prune_feature = gaussian_features[split_filter]
-        temp_prune_obs = gaussian_observation[split_filter]
-
-        #이전 가우시안 또는 키프레임에서 새로 생성한 가우시안 중에서 수행
-        prune_obs = {k.item(): v for k, v, b in zip(temp_prune_indices, temp_prune_obs, temp_prune_feature) if b and k < Nold}
-        #print('densify_and_prune::prune', Nold, len(prune_obs), gaussians_indices[~split_filter].size()[0],self._xyz.size()[0], temp_prune_indices.size()[0], torch.count_nonzero(split_filter), gaussians_indices[split_filter].size()[0])
-        return gaussians_indices, split_filter, prune_obs
+        return removed_ids
 
     def prune_points(self, mask):
         valid_points_mask = ~mask
