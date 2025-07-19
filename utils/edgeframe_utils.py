@@ -15,6 +15,13 @@ class EdgeFrame:
         self.color = color #수정 안함.
         self.depth = depth #수정 안함
 
+        ##오브젝트 영역
+        ##데이터 수정 가능
+        self.objects = {}
+        self.object_ids = []
+        self.object_boxes = []
+
+        ##T는 지금은 이용 안함.
         self.T = np.zeros((4, 4), dtype=np.float64)
         self.T[:3, :3] = R
         if t is None:
@@ -28,6 +35,11 @@ class EdgeFrame:
         #self.gaussianpoints = None #torch, cpu로 내려야 하나? 이것만 수정함. 이걸 통신하자. # 이게 prune 후 frontend로 갈 때 prev, 아직 갱신 안된 키프레임도 처리되어야 함
         #self.gaussians = None
         #self.inliers = None #전송안하면, 초기에 넘겨받고 갱신해야 함. 이것도 torch임.
+
+    def AddObject(self, oid, bbox):
+        self.objects[oid] = bbox
+        self.object_boxes.append(bbox)
+        self.object_ids.append(oid)
 
     def extract_patches_differentiable(self, image, center_pts, patch_size=7):
         """
@@ -339,6 +351,7 @@ class EdgeFrames:
                 image = cv2.remap(image, self.map1x, self.map1y, cv2.INTER_LINEAR)
             if frame.depth is not None:
                 depth = cv2.remap(depth, self.map1x, self.map1y, cv2.INTER_LINEAR)
+                #depth /= self.depth_scale
             """
             if self.has_depth:
                 depth_path = self.depth_paths[idx]

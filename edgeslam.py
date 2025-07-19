@@ -17,6 +17,8 @@ from edge_assisted.gaussian_orb_model import GaussianOrbModel, create_gaussian_o
 from edge_assisted.gaussian_feature import GaussianPointManager
 from utils.multiprocessing_utils import FakeQueue
 
+from edge_assisted.object_manager import Object, ObjectManager
+
 
 class EdgeGSSLAM(SLAM_WIN):
     def __init__(self, config, tracking_mode=False, mapping_update_pose = False, save_dir=None):
@@ -115,10 +117,32 @@ class EdgeGSSLAM(SLAM_WIN):
             q_vis2main=q_vis2main,
         )
 
+        self.object_manager = ObjectManager()
+        self.backend.objects = self.object_manager
+
     def AddFrame(self, fid, img, R, t, depth = None):
-        f = EdgeFrame(fid, img, R, t, depth=depth)
-        self.dataset[fid] = f
+        if fid in self.dataset:
+            f = self.dataset[str(fid)]
+            f.color = img
+            f.depth = depth
+        else:
+            f = EdgeFrame(fid, img, R, t, depth=depth)
+            self.dataset[fid] = f
         return f
+
+    def AddObjectBBox(self, fid, oid, bbox):
+
+        if fid in self.dataset:
+            f = self.dataset[str(fid)]
+        else:
+            f = EdgeFrame(fid, None,None,None)
+            self.dataset[fid] = f
+        if oid not in self.object_manager:
+            self.object_manager[oid] = Object(oid)
+        obj = self.object_manager[oid]
+        obj[fid] = bbox
+        f.AddObject(oid,bbox)
+
 
     def SetDepth(self, fid, depth):
         self.dataset[str(fid)].depth = depth

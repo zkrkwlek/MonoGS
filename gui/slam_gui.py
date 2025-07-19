@@ -132,7 +132,7 @@ class SLAM_GUI:
         chbox_tile.add_child(self.followcam_chbox)
 
         self.staybehind_chbox = gui.Checkbox("From Behind")
-        self.staybehind_chbox.checked = True
+        self.staybehind_chbox.checked = False
         chbox_tile.add_child(self.staybehind_chbox)
         vp_subtile1.add_child(chbox_tile)
 

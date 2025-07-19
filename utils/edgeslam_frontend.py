@@ -22,13 +22,14 @@ from utils.slam_frontend import FrontEnd
 from utils.datahandle_utils import move_gaussianpacket_to_gpu, move_gaussianpacket_to_cpu, move_camera_to_cpu, move_camera_to_gpu, move_gaussianmodel_to_gpu
 from utils.datahandle_utils import move_occ_visibility_to_gpu
 from utils.edgeframe_utils import init_from_dataset
-from edge_assisted.gaussian_feature import project_pc_to_pixel
-from edge_assisted.slam_utils import get_loss_tracking, get_reprojection_loss, get_reprojection_loss2
+from edge_assisted.gaussian_feature import project_pc_to_pixel,convert_xyz, pixels_to_pc, find_correspondence, find_correspondence_with_dist, calculate_feature_mask
+from edge_assisted.slam_utils import get_loss_tracking, get_reprojection_loss, get_patch_loss, get_reprojection_loss2
 #from edge_assisted.gaussian_feature import GaussianPointManager
 
 from typing import Dict, Tuple, Optional, List
 from gsplat import rasterization
 from gsplat.strategy import DefaultStrategy
+from edge_assisted.pose_optimizer import PoseOptimizer, PoseOptimizer2
 
 class EdgeFrontEnd(WinFrontEnd):
     def __init__(self, config):
@@ -38,6 +39,7 @@ class EdgeFrontEnd(WinFrontEnd):
 
         self.edge_queue = None
         self.tracking_mode = None
+        self.tracking_mode_vo = False
 
         #self.testManager = GaussianPointManager()
         self.testManager = None
@@ -45,14 +47,14 @@ class EdgeFrontEnd(WinFrontEnd):
     """"""
     def request_init(self, cur_frame_idx, viewpoint, depth_map):
         frame = self.frames[cur_frame_idx]
-        f = [frame.keypoints.cpu().clone(), frame.descriptors]
+        f = [frame.keypoints.cpu().clone(), frame.descriptors, frame.objects]
         msg = ["init", cur_frame_idx, move_camera_to_cpu(viewpoint), depth_map, f]
         self.backend_queue.put(msg)
         self.requested_init = True
 
     def request_keyframe(self, cur_frame_idx, viewpoint, current_window, depthmap):
         frame = self.frames[cur_frame_idx]
-        f = [frame.keypoints.cpu().clone(), frame.descriptors]
+        f = [frame.keypoints.cpu().clone(), frame.descriptors, frame.objects]
         msg = ["keyframe", cur_frame_idx, move_camera_to_cpu(viewpoint), (current_window), (depthmap),f]
         self.backend_queue.put(msg)
         self.requested_keyframe += 1
@@ -67,14 +69,29 @@ class EdgeFrontEnd(WinFrontEnd):
         #move_gaussians_to_gpu(keyframes)
 
         self.gaussians = gaussians
-        self.gaussians._xyz = self.gaussians._xyz.detach().requires_grad_(False)
-        self.gaussians._features_dc = self.gaussians._features_dc.detach().requires_grad_(False)
-        self.gaussians._features_rest = self.gaussians._features_rest.detach().requires_grad_(False)
-        self.gaussians._opacity = self.gaussians._opacity.detach().requires_grad_(False)
-        self.gaussians._scaling = self.gaussians._scaling.detach().requires_grad_(False)
-        self.gaussians._rotation = self.gaussians._rotation.detach().requires_grad_(False)
+        self.gaussians._xyz = self.gaussians._xyz.detach()#.requires_grad_(False)
+        self.gaussians._features_dc = self.gaussians._features_dc.detach()#.requires_grad_(False)
+        self.gaussians._features_rest = self.gaussians._features_rest.detach()#.requires_grad_(False)
+        self.gaussians._opacity = self.gaussians._opacity.detach()#.requires_grad_(False)
+        self.gaussians._scaling = self.gaussians._scaling.detach()#.requires_grad_(False)
+        self.gaussians._rotation = self.gaussians._rotation.detach()#.requires_grad_(False)
+
+        ## 축소 테스트
+        """
+        x = torch.arange(self.gaussians.get_xyz.shape[0])  # tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+        even_indexed = x[::3]
+        self.gaussians = self.gaussians.clone(even_indexed)
+        for idx, value in occ_aware_visibility.items():
+            occ_aware_visibility[idx] = occ_aware_visibility[idx][even_indexed]
+        """
+        ## 축소 테스트
+
+        ## 축소 테스트
 
         self.occ_aware_visibility = occ_aware_visibility
+        for idx, tensor in self.occ_aware_visibility.items():
+            if tensor.shape[0] != self.gaussians.get_xyz.shape[0]:
+                print('occ_aware_visibility : error case', tensor.shape, self.gaussians.get_xyz.shape)
 
         for kf_id, kf_R, kf_T in keyframes:
             self.cameras[kf_id].update_RT(kf_R.clone().to(self.device), kf_T.clone().to(self.device))
@@ -83,6 +100,7 @@ class EdgeFrontEnd(WinFrontEnd):
         prune_dict = data[4]
 
         if prune_dict is not None and prev_frame_idx is not None:
+            #remove_ids 로 프론트 엔드 매칭 테이블에서 가우시안을 삭제 해야 함.
             last_kf_id = self.current_window[0]
             update_frame_list = [prev_frame_idx, last_kf_id]
 
@@ -133,137 +151,299 @@ class EdgeFrontEnd(WinFrontEnd):
 
         return viewmats, Ks
 
-    def render_for_tracking(self, viewpoint, K: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """Specialized render function for tracking with frozen Gaussians
+    def tracking_with_pc(self, cur_frame_idx, prev_frame_idx, viewpoint, colCam, col_param, matches):
+        prev = self.cameras[prev_frame_idx]
+        prev_frame = self.frames[prev_frame_idx]
 
-        This function explicitly freezes all Gaussian parameters and only allows
-        gradients to flow to camera pose parameters.
+        viewpoint.update_RT(prev.R, prev.T)
+        curr_frame = self.frames[cur_frame_idx]
+
+        ##depth 정렬 테스트
+        t_depth_start = time.time()
+        projections, depths, valid = project_pc_to_pixel(self.gaussians.get_xyz, viewpoint.R, viewpoint.T,
+                                                         viewpoint.fx, viewpoint.fy, viewpoint.cx, viewpoint.cy,
+                                                         viewpoint.image_width, viewpoint.image_height)
+        projections = projections[valid]#torch.round(projections[valid]).int()  # 유효한 프로젝션 결과를 int화 해서 픽셀로 만듬. 정렬하면
+        #depths = depths[valid]
+        #sorted_indices = torch.argsort(depths)
+
+        prev_frame = self.frames[prev_frame_idx]
+        keypoints = prev_frame.keypoints#torch.round(prev_frame.keypoints).int()
+        match_idx = find_correspondence_with_dist(projections, keypoints, th = 2.0)  # 약간 시간이 걸림. 0.01 이하
+
+        #valid 결과에 대해서 수행해야 함.
+        valid_match = match_idx > -1 & self.gaussians.isfeatured[valid]
+        valid_match_idx = match_idx[valid_match]
+        gaussians = self.gaussians.get_xyz[valid][valid_match]
+
+        #prev 키포인트와 대응하는 curr point 획득
+        matches = torch.from_numpy(matches).cuda()
+        prev_to_curr = torch.full((prev_frame.keypoints.shape[0],), -1, dtype=torch.long, device = 'cuda')
+        prev_to_curr[matches[:,0]] = matches[:,1]
+
+        mask = prev_to_curr[valid_match_idx] > -1
+        gaussians = gaussians[mask]
+        points2d = curr_frame.keypoints[prev_to_curr[valid_match_idx][mask]]
+
+        t_depth_end = time.time()
+        print(gaussians.shape,torch.count_nonzero(mask), t_depth_end-t_depth_start)
+        #print('depth sort test', t_depth_end - t_depth_start,
+        #      torch.count_nonzero(match_idx > -1 & self.gaussians.isfeatured[valid]), sorted_indices.shape,
+        #      self.gaussians.get_xyz.shape[0])  # 0.01보다 작음. 거의 0.002정도인데 커질수록 많을 듯
+        ##depth 정렬 테스트
+
+        """
+        temp_keypoints = torch.round(prev_frame.keypoints).int()
+        points = curr_frame.keypoints[matches[:, 1]]
+        temp_keypoints = temp_keypoints[matches[:, 0]]
+
+        render_pkg = render(
+            viewpoint, self.gaussians, self.pipeline_params, self.background
+        )
+
+        image, depth, opacity = (
+            render_pkg["render"],
+            render_pkg["depth"],
+            render_pkg["opacity"],
+        )
+        depth = depth.detach().clone().squeeze(0)
+
+        #gaussians, add_colors, valid_depth_mask = convert_xyz(temp_keypoints, viewpoint.original_image, depth)
+        depth_values = depth[temp_keypoints[:, 1], temp_keypoints[:, 0]]
+        valid_mask = depth_values > 0
+
+        temp_keypoints = temp_keypoints[valid_mask]
+        valid_depths = depth_values[valid_mask]
+        points2d = points[valid_mask].double()
+
+        gaussians = torch.cat([
+            temp_keypoints.float(),
+            valid_depths.unsqueeze(1)
+        ], dim=1)
+
+        gaussians = pixels_to_pc(gaussians, viewpoint.R, viewpoint.T, viewpoint.fx, viewpoint.fy, viewpoint.cx, viewpoint.cy)
         """
 
-        # Get current pose (this WILL have gradients)
-        #viewpoint.R, viewpoint.T를 4x4로 변환
-        #pose = self.get_camera_pose()
-        viewmats, Ks = self.create_camera_matrices(K, viewpoint.R, viewpoint.T)
+        ##pose optimization
+        model = PoseOptimizer2(viewpoint.R, viewpoint.T).cuda()
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
-        # Freeze ALL Gaussian parameters using context manager
+        losses = []
+        best_loss = float('inf')
+        best_state = None
+        t_po1 = time.time()
+        print("최적화 시작...")
+        th = 2.447
+        for epoch in range(100):
+
+            # 현재 포즈로 포인트 변환
+            transformed_points, tmp_valid = model(gaussians,viewpoint.fx, viewpoint.fy, viewpoint.cx, viewpoint.cy,
+                                                             viewpoint.image_width, viewpoint.image_height)
+
+            # L2 거리 손실
+            #loss = torch.mean(torch.sum((transformed_points - points2d) ** 2, dim=1))
+            residuals = transformed_points[tmp_valid] - points2d[tmp_valid]
+            distances = torch.norm(residuals, dim=1)
+
+            # Huber loss (outlier에 더 robust)
+            delta = 0.1
+            huber_loss = torch.where(distances < delta,
+                                     0.5 * distances ** 2,
+                                     delta * distances - 0.5 * delta ** 2)
+            loss = torch.mean(huber_loss)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            if loss.item() < best_loss:
+                best_loss = loss.item()
+                best_state = {
+                    'rotation': model.rotation.data.clone(),
+                    'translation': model.translation.data.clone()
+                }
+            losses.append(loss.item())
+
+            if epoch % 10 == 0:
+                self.q_main2vis.put(
+                    move_gaussianpacket_to_cpu(
+                        gui_utils.GaussianPacket(
+                            current_frame=viewpoint,
+                            gtcolor=viewpoint.original_image,
+                            gtdepth=viewpoint.depth
+                            if not self.monocular
+                            else np.zeros((viewpoint.image_height, viewpoint.image_width)),
+                        )
+                    )
+                )
+                print(f"Epoch {epoch}, Loss: {loss.item():.6f}", time.time()-t_po1)
+        model.rotation.data = best_state['rotation']
+        model.translation.data = best_state['translation']
+        R, t = model.GetPose()
+
+        ##pypose
+        """
+        ta = time.time()
+        K = torch.tensor([[self.dataset.fx, 0, self.dataset.cx],
+                      [0, self.dataset.fy, self.dataset.cy],
+                      [0, 0, 1]], dtype=torch.float64, device = 'cuda')
+        module = PoseOptimizer(viewpoint.R, viewpoint.T)
+
+        points3d = gaussians.double()
+        optimizer = torch.optim.LBFGS(module.parameters(), lr=1.0)
+        huber = torch.nn.HuberLoss(delta=1.0, reduction='mean')  # delta는 상황에 따라 조정[1]
+
+        def closure():
+            optimizer.zero_grad()
+            proj = module(points3d, K)
+            loss = huber(proj, points2d)  # Huber loss 적용!
+            loss.backward()
+            return loss
+
+        for i in range(20):
+            optimizer.step(closure)
+        R, t = module.GetPose()
+        tb = time.time()
+        print("asdf", tb-ta)
+        """
+        ##pypose
+
+        ####COLMAP
+        """
+        result = pycolmap.estimate_absolute_pose(
+            points2d.double().cpu().numpy(), gaussians.double().cpu().numpy(),colCam, col_param
+        )
+
+        #if result['success']:
+        rigid = result['cam_from_world']
+        R = torch.from_numpy(rigid.rotation.matrix()).cuda()
+        t = torch.from_numpy(rigid.translation).cuda()
+        """
+        ####COLMAP
+
+        viewpoint.update_RT(R,t)
+
+
         with torch.no_grad():
-            # Prepare frozen Gaussian parameters
-            frozen_means = self.gaussians._xyz.clone()
-            frozen_quats = torch.nn.functional.normalize(self.gaussians._rotation.clone(), dim=-1)
-            frozen_scales = torch.exp(self.gaussians._scaling.clone())
-            frozen_opacities = torch.sigmoid(self.gaussians._opacity.clone().squeeze())
-            frozen_colors = self.gaussians._features_dc.clone()
-
-        # Re-enable gradients only for the frozen tensors we want to use
-        # (This is a more explicit way to ensure no gradients flow to Gaussians)
-        frozen_means = frozen_means.detach().requires_grad_(False)
-        frozen_quats = frozen_quats.detach().requires_grad_(False)
-        frozen_scales = frozen_scales.detach().requires_grad_(False)
-        frozen_opacities = frozen_opacities.detach().requires_grad_(False)
-        frozen_colors = frozen_colors.detach().requires_grad_(False)
-
-        print(frozen_opacities.size())
-
-        # Render with gsplat - only pose gradients will be computed
-        rendered_colors, rendered_alphas, info = rasterization(
-            means=frozen_means,
-            quats=frozen_quats,
-            scales=frozen_scales,
-            opacities=frozen_opacities,
-            colors=frozen_colors,
-            viewmats=viewmats,  # This WILL have gradients for pose optimization
-            Ks=Ks,
-            width=viewpoint.image_width,
-            height=viewpoint.image_height,
-            near_plane=0.01,
-            far_plane=100.0,
-            radius_clip=0.3,
-            packed=False,
-            sparse_grad=False,  # No need for sparse grads during tracking
-            absgrad=False,  # No need for absgrad during tracking
-            render_mode="RGB",  # Only need RGB for tracking
-            sh_degree=0
+            render_pkg = render(
+                viewpoint, self.gaussians, self.pipeline_params, self.background
+            )
+        image, depth, opacity = (
+            render_pkg["render"],
+            render_pkg["depth"],
+            render_pkg["opacity"],
         )
+        self.median_depth = get_median_depth(depth, opacity)
 
-        rendered_image = rendered_colors[0, :, :, :]  # [H, W, 3]
-        rendered_alpha = rendered_alphas[0]  # [H, W]
+        ###test
+        projections, depths, valid = project_pc_to_pixel(gaussians, viewpoint.R, viewpoint.T,
+                                                         viewpoint.fx, viewpoint.fy, viewpoint.cx, viewpoint.cy,
+                                                         viewpoint.image_width, viewpoint.image_height)
+        projections = projections[valid]
+        points = points2d[valid]
+        self.testManager.tracker.visualize2(curr_frame.color, projections, points, delay=10, save=True,
+                                            filename='./res/' + str(cur_frame_idx) + '.jpg')
 
-        return {
-            'image': rendered_image,
-            'alpha': rendered_alpha,
-            'info': info
-        }
+        return render_pkg
 
-    def render(self, K: torch.Tensor, target_pose: Optional[torch.Tensor] = None,
-               freeze_gaussians: bool = False) -> Dict[str, torch.Tensor]:
-        """Render current scene from camera viewpoint
-
-        Args:
-            K: Camera intrinsics
-            target_pose: Optional target pose, uses current pose if None
-            freeze_gaussians: If True, detach gaussian parameters from gradient computation
+    def tracking_with_patch(self, cur_frame_idx, prev_frame_idx, viewpoint, matches):
+        prev = self.cameras[prev_frame_idx]
+        prev_frame = self.frames[prev_frame_idx]
+        viewpoint.update_RT(prev.R, prev.T)
+        """
+        prev_view = self.cameras[prev_frame_idx]
+        prev_render_pkg = render(
+            prev_view, self.gaussians, self.pipeline_params, self.background
+        )
+        prev_render_image = (
+            prev_render_pkg["render"],
+        )
         """
 
-        # Use target pose if provided, otherwise use current estimated pose
-        if target_pose is not None:
-            pose = target_pose
-        else:
-            pose = self.get_camera_pose()
+        curr_frame = self.frames[cur_frame_idx]
 
-        # Create camera matrices
-        viewmats, Ks = self.create_camera_matrices(K, pose)
+        ##patch
 
-        # Prepare Gaussian parameters
-        if freeze_gaussians:
-            # Detach gaussian parameters - no gradients will flow to them
-            means = self.means.detach()
-            quats = torch.nn.functional.normalize(self.quats.detach(), dim=-1)
-            scales = torch.exp(self.scales.detach())  # Convert from log space
-            opacities = torch.sigmoid(self.opacities.detach())  # Convert from logit space
-            colors = self.colors.detach()  # SH coefficients
-        else:
-            # Normal rendering with gradients
-            means = self.means
-            quats = torch.nn.functional.normalize(self.quats, dim=-1)
-            scales = torch.exp(self.scales)  # Convert from log space
-            opacities = torch.sigmoid(self.opacities)  # Convert from logit space
-            colors = self.colors  # SH coefficients
+        curr_patch, curr_patch_valid = curr_frame.extract_patches_differentiable(
+            viewpoint.original_image, curr_frame.keypoints[matches[:, 1]])
 
-        # Render with gsplat
-        rendered_colors, rendered_alphas, info = rasterization(
-            means=means,
-            quats=quats,
-            scales=scales,
-            opacities=opacities,
-            colors=colors,
-            viewmats=viewmats,
-            Ks=Ks,
-            width=self.config.image_width,
-            height=self.config.image_height,
-            near_plane=self.config.near_plane,
-            far_plane=self.config.far_plane,
-            radius_clip=self.config.radius_clip,
-            packed=self.config.use_packed,
-            sparse_grad=self.config.use_sparse_grad,
-            absgrad=self.config.use_absgrad,
-            render_mode="RGB+D",  # Render both color and depth
-            sh_degree=0  # Use 3 SH bands, 2
+        opt_params = []
+        opt_params.append(
+            {
+                "params": [viewpoint.cam_rot_delta],
+                "lr": self.config["Training"]["lr"]["cam_rot_delta"],
+                "name": "rot_{}".format(viewpoint.uid),
+            }
         )
+        opt_params.append(
+            {
+                "params": [viewpoint.cam_trans_delta],
+                "lr": self.config["Training"]["lr"]["cam_trans_delta"],
+                "name": "trans_{}".format(viewpoint.uid),
+            }
+        )
+        pose_optimizer = torch.optim.Adam(opt_params)
 
-        # Extract rendered image and depth
-        rendered_image = rendered_colors[0, :, :, :3]  # [H, W, 3]
-        rendered_depth = rendered_colors[0, :, :, 3]  # [H, W]
-        rendered_alpha = rendered_alphas[0]  # [H, W]
+        t1 = 0.0
+        t2 = 0.0
+        t3 = 0.0
+        t4 = 0.0
+        t5 = 0.0
+        t_n = 0
+        prev_tau = None
+        for tracking_itr in range(self.tracking_itr_num):
+            t1 = t1+time.time()
 
-        return {
-            'image': rendered_image,
-            'depth': rendered_depth,
-            'alpha': rendered_alpha,
-            'info': info
-        }
+            render_pkg = render(
+                viewpoint, self.gaussians, self.pipeline_params, self.background
+            )
 
-    def tracking_with_patch(self, cur_frrame_idx, prev_frame_idx, viewpoint):
-        pass
+            image, depth, opacity = (
+                render_pkg["render"],
+                render_pkg["depth"],
+                render_pkg["opacity"],
+            )
+
+            prev_patch, prev_patch_valid = prev_frame.extract_patches_differentiable(
+                image, prev_frame.keypoints[matches[:, 0]])
+
+            t2 = t2 + time.time()
+
+            pose_optimizer.zero_grad()
+            t3+=time.time()
+            #loss_tracking = get_loss_tracking(self.config, image, depth, opacity, viewpoint)
+            err = get_patch_loss(prev_patch, curr_patch)
+            loss_tracking = err.mean()
+
+            t4 = t4+time.time()
+            loss_tracking.backward()
+
+            t5 = t5+time.time()
+            t_n = t_n+1
+            with torch.no_grad():
+                pose_optimizer.step()
+                converged, prev_tau = update_pose(viewpoint, tau_prev=prev_tau)
+
+            if tracking_itr % 10 == 0:
+                self.q_main2vis.put(
+                    move_gaussianpacket_to_cpu(
+                        gui_utils.GaussianPacket(
+                            current_frame=viewpoint,
+                            gtcolor=viewpoint.original_image,
+                            gtdepth=viewpoint.depth
+                            if not self.monocular
+                            else np.zeros((viewpoint.image_height, viewpoint.image_width)),
+                        )
+                    )
+                )
+
+            if converged:
+                break
+        print("tracking processig time", cur_frame_idx, t_n, (t2 - t1), 'proj', (t3 - t2), 'loss', (t4 - t3),
+              'backward', (t5 - t4), self.gaussians._xyz.size()[0])
+
+        self.median_depth = get_median_depth(depth, opacity)
+        return render_pkg
 
     def tracking_only_feature(self, cur_frame_idx, prev_frame_idx, viewpoint):
         prev = self.cameras[prev_frame_idx]
@@ -544,10 +724,18 @@ class EdgeFrontEnd(WinFrontEnd):
 
         return render_pkg
 
-    def tracking(self, cur_frame_idx, prev_frame_idx, viewpoint):
+    def tracking(self, cur_frame_idx, prev_frame_idx, viewpoint, matches = None):
 
         prev = self.cameras[prev_frame_idx]
         viewpoint.update_RT(prev.R, prev.T)
+
+        """
+        curr_frame = self.frames[c ur_frame_idx]
+        T = torch.eye(4, device='cuda')
+        R = curr_frame.T[:3, :3]
+        t = curr_frame.T[:3, 3]
+        viewpoint.update_RT(R, t)
+        """
 
         opt_params = []
         opt_params.append(
@@ -589,12 +777,32 @@ class EdgeFrontEnd(WinFrontEnd):
         t5 = 0.0
         t_n = 0
 
-        curr_frame = self.frames[cur_frame_idx]
+        ##depth 정렬 테스트
+        with torch.no_grad():
+            projections, depths, valid_proj = project_pc_to_pixel(self.gaussians.get_xyz, viewpoint.R, viewpoint.T,
+                                                             viewpoint.fx, viewpoint.fy, viewpoint.cx, viewpoint.cy,
+                                                             viewpoint.image_width, viewpoint.image_height)
+
+            prev_frame = self.frames[prev_frame_idx]
+            cur_frame = self.frames[cur_frame_idx]
+            #projections = (projections[valid])  # 유효한 프로젝션 결과를 int화 해서 픽셀로 만듬. 정렬하면
+            keypoints = (prev_frame.keypoints)
+            match_idx = find_correspondence_with_dist(projections, keypoints, th=7)  # 약간 시간이 걸림. 0.01 이하
+
+            valid_match = (match_idx > -1)# & self.gaussians.isfeatured[valid]
+            valid_idx = torch.where(valid_match & valid_proj)[0] #유효한 이미지 안의 프로젝션 검출. 매치 인덱스 값이 들어갈 곳.
+            #valid_idx = valid_idx[valid_match] #매치 값
+
+
+
+            gaussians = self.gaussians.clone(valid_idx) #self.gaussians.get_xyz[valid][valid_match]
+            print('tracking matching test',torch.count_nonzero(valid_idx), self.gaussians.get_xyz.shape[0], gaussians._xyz.shape[0])
+            feature_mask=calculate_feature_mask(cur_frame.keypoints, viewpoint.image_width, viewpoint.image_height, radius=5)
 
         for tracking_itr in range(self.tracking_itr_num):
             t1 = t1+time.time()
             render_pkg = render(
-                viewpoint, self.gaussians, self.pipeline_params, self.background
+                viewpoint, gaussians, self.pipeline_params, self.background
             )
 
             image, depth, opacity = (
@@ -605,13 +813,12 @@ class EdgeFrontEnd(WinFrontEnd):
 
             t2 = t2 + time.time()
 
-            pose_optimizer.zero_grad()
             t3+=time.time()
-            loss_tracking = get_loss_tracking(self.config, image, depth, opacity, viewpoint)
+            loss_tracking = get_loss_tracking(self.config, image, depth, opacity, viewpoint, feature_mask=feature_mask)
 
             t4 = t4+time.time()
+            pose_optimizer.zero_grad()
             loss_tracking.backward()
-
             t5 = t5+time.time()
             t_n = t_n+1
             with torch.no_grad():
@@ -622,6 +829,7 @@ class EdgeFrontEnd(WinFrontEnd):
                 self.q_main2vis.put(
                     move_gaussianpacket_to_cpu(
                         gui_utils.GaussianPacket(
+                            #gaussians=(gaussians),
                             current_frame=viewpoint,
                             gtcolor=viewpoint.original_image,
                             gtdepth=viewpoint.depth
@@ -634,8 +842,82 @@ class EdgeFrontEnd(WinFrontEnd):
             if converged:
                 break
 
-        print("tracking processig time", cur_frame_idx, t_n,(t2-t1), 'proj',(t3-t2), 'loss', (t4-t3), 'backward', (t5-t4), self.gaussians._xyz.size()[0])
+        print("tracking processig time", cur_frame_idx, 'obj', len(cur_frame.objects), t_n, 'render',(t2-t1), 'proj',(t3-t2), 'loss', (t4-t3), 'backward', (t5-t4), self.gaussians._xyz.size()[0])
+
         self.median_depth = get_median_depth(depth, opacity)
+
+        ##depth 정렬 테스트
+        """
+        t_depth_start = time.time()
+        projections, depths, valid = project_pc_to_pixel(self.gaussians.get_xyz, viewpoint.R, viewpoint.T,
+                                                         viewpoint.fx, viewpoint.fy, viewpoint.cx, viewpoint.cy,
+                                                         viewpoint.image_width, viewpoint.image_height)
+
+        projections = (projections[valid])  # 유효한 프로젝션 결과를 int화 해서 픽셀로 만듬. 정렬하면
+        depths = depths[valid]
+        sorted_indices = torch.argsort(depths)
+
+        prev_frame = self.frames[cur_frame_idx]
+        keypoints = (prev_frame.keypoints)
+        match_idx = find_correspondence_with_dist(projections, keypoints, th = 10)  # 약간 시간이 걸림. 0.01 이하
+
+        valid_match = (match_idx > -1) & self.gaussians.isfeatured[valid]
+        gaussians = self.gaussians.get_xyz[valid][valid_match]
+
+        t_depth_end = time.time()
+        print('depth sort test', t_depth_end - t_depth_start, 'match=',torch.count_nonzero(match_idx > -1),
+              torch.count_nonzero((match_idx > -1) & self.gaussians.isfeatured[valid]), sorted_indices.shape,
+              torch.count_nonzero(self.gaussians.isfeatured),self.gaussians.get_xyz.shape[0])  # 0.01보다 작음. 거의 0.002정도인데 커질수록 많을 듯
+        """
+        ##depth 정렬 테스트
+        with torch.no_grad():
+            render_pkg = render(
+                viewpoint, self.gaussians, self.pipeline_params, self.background
+            )
+            curr_visibility = (render_pkg["n_touched"] > 0).long()
+
+            ##visualize test
+            """"""
+            image_np = (
+                viewpoint.original_image
+                    .permute(1, 2, 0)  # (C, H, W) → (H, W, C)
+                    .cpu()  # GPU → CPU
+                    .numpy()  # NumPy 배열로 변환
+            )
+            image_np = (image_np * 255.0).astype(np.uint8)
+            out = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+
+            projections, depths, valid_proj = project_pc_to_pixel(self.gaussians.get_xyz, viewpoint.R, viewpoint.T,
+                                                                  viewpoint.fx, viewpoint.fy, viewpoint.cx,
+                                                                  viewpoint.cy,
+                                                                  viewpoint.image_width, viewpoint.image_height)
+
+            points1 = projections[valid_proj].detach().cpu().numpy()
+            points2 = cur_frame.keypoints.detach().cpu().numpy()
+
+            test_mask = ~valid_match & valid_proj
+            points3 = projections[test_mask].detach().cpu().numpy()
+            points4 = projections[valid_proj & ~curr_visibility].detach().cpu().numpy()
+
+            for pt1 in points1:
+                p1 = (int(round(pt1[0])), int(round(pt1[1])))
+                cv2.circle(out, p1, 1, (0, 0, 255), -1, lineType=16)
+            for pt1 in points3:
+                p1 = (int(round(pt1[0])), int(round(pt1[1])))
+                cv2.circle(out, p1, 2, (255, 0, 0), -1, lineType=16)
+            for pt1 in points2:
+                p1 = (int(round(pt1[0])), int(round(pt1[1])))
+                cv2.circle(out, p1, 1, (0, 255, 255), -1, lineType=16)
+            for pt1 in points4:
+                p1 = (int(round(pt1[0])), int(round(pt1[1])))
+                cv2.circle(out, p1, 1, (255, 255, 0), -1, lineType=16)
+
+
+
+            cv2.imshow("asdfasdfasdf", out)
+            cv2.waitKey(10)
+
+            ##visualize test
 
         return render_pkg
 
@@ -659,6 +941,7 @@ class EdgeFrontEnd(WinFrontEnd):
                       [0, 0, 1]], dtype=np.float32)
         D = self.dataset.dist_coeffs
 
+        ##colmap
         colCam = pycolmap.Camera(
             model="OPENCV",  # 또는 "SIMPLE_RADIAL", "SIMPLE_PINHOLE" 등
             width=self.dataset.width,
@@ -674,10 +957,11 @@ class EdgeFrontEnd(WinFrontEnd):
 
         col_param = pycolmap.AbsolutePoseEstimationOptions()
         col_param.estimate_focal_length = False
-        col_param.ransac.max_error = 9.0
-        col_param.ransac.min_inlier_ratio = 0.1
+        col_param.ransac.max_error = 4.0
+        col_param.ransac.min_inlier_ratio = 0.6
         col_param.ransac.max_num_trials = 1000
         col_param.ransac.confidence = 0.99
+        ##colmap
 
         ##solve pnp
         reprojection_threshold = np.float32(9.0)
@@ -686,6 +970,12 @@ class EdgeFrontEnd(WinFrontEnd):
         ##solve pnp
 
         #gtsam 설정
+        gtsam_prior_noise = gtsam.noiseModel.Diagonal.Variances(np.array([0.002, 0.002, 0.002, 0.002, 0.002, 0.002]))
+        gtsam_closure_noise = gtsam.noiseModel.Diagonal.Variances(np.array([0.005, 0.005, 0.005, 0.02, 0.02, 0.02]))
+
+        gtsam_finalOptResult = gtsam.Values()
+        gtsam_graph = gtsam.NonlinearFactorGraph()
+        gtsam_initial_estimates = gtsam.Values()
         """
         gtsamCam = gtsam.Cal3DS2(self.dataset.fx, self.dataset.fy, 0.0, self.dataset.cx, self.dataset.cy,
                                  self.dataset.dist_coeffs[0], self.dataset.dist_coeffs[1],
@@ -701,6 +991,7 @@ class EdgeFrontEnd(WinFrontEnd):
         gtsamPoseNoise = gtsam.noiseModel.Diagonal.Sigmas(np.array([0.1] * 6))  # Pose3: 6D
         current_estimate = None
         """
+        # gtsam 설정
 
         tic = torch.cuda.Event(enable_timing=True)
         toc = torch.cuda.Event(enable_timing=True)
@@ -744,7 +1035,7 @@ class EdgeFrontEnd(WinFrontEnd):
                     time.sleep(0.01)
                     continue
 
-                if (not self.initialized or not self.tracking_mode) and self.requested_keyframe > 0:
+                if (not self.initialized or not self.tracking_mode or self.tracking_mode_vo) and self.requested_keyframe > 0:
                     time.sleep(0.01)
                     continue
                 frame_start_time = time.time()
@@ -817,9 +1108,14 @@ class EdgeFrontEnd(WinFrontEnd):
                 s = time.time()
 
                 if self.tracking_mode:
-                    print('frontend::observation', self.gaussians.observation_indices.shape, self.gaussians.observation_points.shape, self.current_window)
                     #matching with prev frame
                     match_time_start = time.time()
+
+                    prev_frame = self.frames[(prev_frame_idx)]
+                    cur_matches = self.testManager.tracker.match(prev_frame.descriptors,curr_frame.descriptors)
+
+
+
                     """
                     prev_frame = self.frames[(prev_frame_idx)]
                     curr_index = torch.where((prev_frame.gaussianpoints > -1))[0].cpu().numpy() #(curr_frame.gaussianpoints > -1).numpy()#
@@ -836,170 +1132,14 @@ class EdgeFrontEnd(WinFrontEnd):
                     """
                     match_time_end = time.time()
 
+                    """
+                    if len(self.current_window) > 2:
+                        render_pkg = self.tracking_with_pc(cur_frame_idx, prev_frame_idx, viewpoint, colCam, col_param, cur_matches)
+                    else:
+                    """
                     render_pkg = self.tracking(cur_frame_idx, prev_frame_idx, viewpoint)
 
-                    #self.render_for_tracking(viewpoint, K)
-
-                    #아웃 라이어 제거
-                    #가우시안 포인트 시각화
-
-                    #매칭 앤 트래킹 테스트
-                    #out = self.testManager.tracker.visualize(prev_frame.color, curr_frame.color, cur_matches, prev_frame.keypoints, curr_frame.keypoints)
-                    #cv2.imshow("match", out)
-                    #cv2.waitKey(1)
-
-                    """
-                    #시각화
-                    #outlier removal
-                    prev = self.cameras[prev_frame_idx]
-                    viewpoint.update_RT(prev.R, prev.T)
-
-                    prevR = prev.R.clone().detach().cpu().numpy()
-                    prev_rvec,_=cv2.Rodrigues(prevR)
-                    prev_tvec = prev.T.clone().detach().cpu().numpy()
-
-                    projection, points, gaussians, _ = curr_frame.update_gaussianpoints(self.gaussians, viewpoint.R, viewpoint.T,
-                       viewpoint.fx, viewpoint.fy, viewpoint.cx, viewpoint.cy,
-                       viewpoint.image_width, viewpoint.image_height, th_radius=100.0
-                    )
-                    gtsam_t1 = time.time()
-                    #gaussians = gaussians.detach().cpu().numpy()
-                    #points = points.cpu().numpy()
-                    """
-                    """
-                    gtsamGraph = gtsam.NonlinearFactorGraph()
-                    gtsamInitial = gtsam.Values()
-                    pose_key = cur_frame_idx
-
-                    prevview = self.cameras[prev_frame_idx]
-                    R = prevview.R.clone().detach().cpu().numpy()
-                    quat = Rotation.from_matrix(R).as_quat()  # [x, y, z, w] 순서
-                    w, x, y, z = quat[3], quat[0], quat[1], quat[2]
-                    rot = gtsam.Rot3.Quaternion(w,x,y,z)
-                    t = prevview.T.clone().detach().cpu().numpy()
-                    trans = gtsam.Point3(*t)
-
-                    initial_pose = gtsam.Pose3(rot, trans)
-                    print('pose', initial_pose)
-                    #gtsamGraph.add(gtsam.PriorFactorPose3(pose_key, initial_pose, gtsamPoseNoise))
-                    gtsamInitial.insert(pose_key, initial_pose)
-
-                    gtsam_t_temp1 = time.time()
-                    for i in range(len(gaussians)):
-                        landmark_key = gaussian_ids[i].item()+10000
-                        point_3d = gtsam.Point3(*gaussians[i])
-                        point_2d = gtsam.Point2(*points[i])
-                        if not current_estimate .exists(landmark_key):
-                            gtsamInitial.insert(landmark_key, point_3d)
-                        gtsamGraph.push_back(
-                            gtsam.GenericProjectionFactorCal3_S2(
-                                point_2d, gtsamPointNoise, pose_key, landmark_key, gtsamCam
-                            )
-                        )
-                        #print('point', landmark_key, point_3d, point_2d)
-                    gtsam_t_temp2 = time.time()
-                    print('asdf', gtsam_t_temp1-gtsam_t1, gtsam_t_temp2-gtsam_t_temp1)
-                    isam2.update(gtsamGraph, gtsamInitial)
-                    current_estimate = isam2.calculateEstimate()
-                    #gtsamParams = gtsam.LevenbergMarquardtParams()
-                    #gtsamOptimizer = gtsam.LevenbergMarquardtOptimizer(gtsamGraph, gtsamInitial, gtsamParams)
-                    #gtsamResult = gtsamOptimizer.optimize()
-                    optimized_pose = current_estimate.atPose3(pose_key)
-                    """
-
-                    """
-                    success, rvec, tvec = cv2.solvePnP(
-                        gaussians.detach().cpu().numpy(),
-                        points.cpu().numpy(),
-                        K,
-                        D,
-                        rvec=prev_rvec,
-                        tvec=prev_tvec,
-                        useExtrinsicGuess=True,
-                        #reprojectionError=reprojection_threshold,
-                        #iterationsCount=max_iterations,
-                        #confidence=confidence,
-                        flags=cv2.SOLVEPNP_EPNP,
-                    )
-                    """
-
-                    """
-                    result = pycolmap.estimate_absolute_pose(
-                        points.cpu().numpy(), gaussians.cpu().numpy(),colCam, col_param
-                    )
-
-                    #if result['success']:
-
-                    rigid = result['cam_from_world']
-                    #tvec = result['translation']
-                    print(rigid.rotation.matrix(), rigid.translation)
-                    #quat = [qvec[1], qvec[2], qvec[3], qvec[0]]
-                    #rotation = Rotation.from_quat(quat)
-                    #R = rotation.as_matrix()
-
-
-                    #inliers
-                    #R, _ = cv2.Rodrigues(rvec)
-                    R = torch.from_numpy(rigid.rotation.matrix()).cuda()
-                    t = torch.from_numpy(rigid.translation).cuda()
-
-                    viewpoint.update_RT(R,t)
-                    with torch.no_grad():
-                        render_pkg = render(
-                            viewpoint, self.gaussians, self.pipeline_params, self.background
-                        )
-                    image, depth, opacity = (
-                        render_pkg["render"],
-                        render_pkg["depth"],
-                        render_pkg["opacity"],
-                    )
-                    self.median_depth = get_median_depth(depth, opacity)
-                    """
-                    gtsam_t2 = time.time()
-
-                    #print("Optimized Camera Pose:\n", rvec,tvec, gtsam_t2-gtsam_t1)
-                    """
-                    projection, points, gaussians, _ = curr_frame.update_gaussianpoints(self.gaussians, viewpoint.R,
-                        viewpoint.T,
-                        viewpoint.fx, viewpoint.fy,
-                        viewpoint.cx, viewpoint.cy,
-                        viewpoint.image_width,
-                        viewpoint.image_height,
-                    )
-                    """
                     frame_end_time = time.time()
-                    #print('tracking', cur_frame_idx, projection.size()[0], kp_time_end-kp_time_start, kp_time_end-kp_time_temp, frame_end_time-frame_start_time, match_time_end-match_time_start, gtsam_t2-gtsam_t1)
-                    #self.testManager.tracker.visualize2(curr_frame.color, projection, points, delay = 10, save=True, filename='./res/'+str(cur_frame_idx)+'.jpg')
-
-                    #prev = self.cameras[prev_frame_idx]
-
-                    """
-                    valid = prev_frame.gaussianpoints > -1
-                    gindex = prev_frame.gaussianpoints[valid]
-                    prev_frame_gaussians = self.gaussians._xyz[gindex]
-                    projection, valid_projection = project_pc_to_pixel(prev_frame_gaussians, prev.R, prev.T,
-                                                                       viewpoint.fx, viewpoint.fy, viewpoint.cx,
-                                                                       viewpoint.cy,
-                                                                       viewpoint.image_width, viewpoint.image_height)
-                    points = torch.from_numpy(prev_frame.keypoints[valid][valid_projection]).cuda()
-                    self.testManager.tracker.visualize2(prev_frame.color, projection,points)
-                    """
-                    """
-                    valid = prev_frame.gaussianpoints[matches[:,0]] > -1
-                    filted_matches = matches[valid,:]
-                    gindex = prev_frame.gaussianpoints[filted_matches[:,0]]
-                    prev_frame_gaussians = self.gaussians._xyz[gindex]
-                    projection, valid_projection= project_pc_to_pixel(prev_frame_gaussians, viewpoint.R, viewpoint.T,
-                                        viewpoint.fx, viewpoint.fy, viewpoint.cx, viewpoint.cy,
-                                        viewpoint.image_width, viewpoint.image_height)
-                    points = torch.from_numpy(curr_frame.keypoints[filted_matches[valid_projection,1]]).cuda()
-                    """
-
-                    #print(cur_frame_idx, torch.count_nonzero(self.gaussians.isfeatured),
-                    #      np.count_nonzero(self.gaussians.observations)
-                    #      , self.gaussians._xyz.size(), prev_frame_gaussians.size(), projection.size(), points.shape)
-
-                    #self.testManager.tracker.visualize2(curr_frame.color, projection, points, delay= 1)
 
                 else:
                     viewpoint.update_RT(viewpoint.R_gt, viewpoint.T_gt)
@@ -1014,72 +1154,6 @@ class EdgeFrontEnd(WinFrontEnd):
                     self.median_depth = get_median_depth(depth, opacity)
 
                 ##test
-                (
-                    image,
-                    viewspace_point_tensor,
-                    visibility_filter,
-                    radii,
-                    depth,
-                    opacity,
-                    n_touched,
-                ) = (
-                    render_pkg["render"],
-                    render_pkg["viewspace_points"],
-                    render_pkg["visibility_filter"],
-                    render_pkg["radii"],
-                    render_pkg["depth"],
-                    render_pkg["opacity"],
-                    render_pkg["n_touched"],
-                )
-                #print("test", len(radii), len(opacity), len(n_touched))
-
-                ##render depth test
-
-                t1 = time.time()
-                curr_visibility = (render_pkg["n_touched"] > 0).long()
-                true_indices = torch.nonzero(visibility_filter).squeeze(dim=1)
-                a = self.gaussians._xyz[true_indices]
-                t2 = time.time()
-                #print(t2-t1, len(true_indices), curr_visibility.size())
-                #print("visible test ", curr_visibility.size(), self.gaussians._xyz.size())
-
-                t3 = time.time()
-                
-                #img_rgb = cv2.cvtColor(image.detach().clone().cpu().numpy(), cv2.COLOR_BGR2RGB)
-                #pred = self.testManager.feature_model.run(img_rgb)
-                #keypoints = pred['keypoints']
-                #descriptors = pred['descriptors']
-                #frame = self.dataset[str(cur_frame_idx)]
-                #pred = self.testManager.feature_model.run(frame.color)
-                #frame.keypoints = pred['keypoints']
-                #frame.descriptors = pred['descriptors']
-                t4 = time.time()
-                """
-                if len(descriptors) > 0:
-                    matches = self.testManager.tracker.match(descriptors, frame.descriptors)
-                    out = self.testManager.tracker.visualize(img_rgb, frame.color, matches, keypoints, frame.keypoints)
-                    t5 = time.time
-                    #out, N_matches = self.testManager.tracker.update(frame.color, frame.keypoints, frame.descriptors)
-                    #print(t4 - t3, t5-t4, self.testManager.feature_model.device, (frame.keypoints.shape))
-
-                    cv2.imshow("match", out)
-                    cv2.waitKey(1)
-                #print(depth.size())
-                """
-                """
-                if self.testManager.points is None :
-                    self.testManager.test(frame.keypoints, depth, viewpoint.R, viewpoint.T,
-                                      viewpoint.fx, viewpoint.fy, viewpoint.cx, viewpoint.cy)
-                else:
-                    self.testManager.test2(frame.color, frame.keypoints, viewpoint.R, viewpoint.T,
-                                      viewpoint.fx, viewpoint.fy, viewpoint.cx, viewpoint.cy)
-                """
-                #print(viewpoint.R, viewpoint.T, frame.T)
-
-                ##test
-
-                e = time.time()
-                # print("tracking time = ", cur_frame_idx, (e-s), viewpoint.exposure_a, viewpoint.exposure_b)
                 current_window_dict = {}
                 current_window_dict[self.current_window[0]] = self.current_window[1:]
                 keyframes = [self.cameras[kf_idx] for kf_idx in self.current_window]
@@ -1122,10 +1196,8 @@ class EdgeFrontEnd(WinFrontEnd):
                             check_time
                             and point_ratio < self.config["Training"]["kf_overlap"]
                     )
-                    #print("test", len(self.current_window), point_ratio, intersection, union)
                 if self.single_thread:
                     create_kf = check_time and create_kf
-
                 if create_kf:
                     self.current_window, removed = self.add_to_window(
                         cur_frame_idx,
@@ -1177,7 +1249,6 @@ class EdgeFrontEnd(WinFrontEnd):
                     duration = tic.elapsed_time(toc)
                     time.sleep(max(0.01, 1.0 / 3.0 - duration / 1000))
             else:
-                #s = time.time()
 
                 data = self.frontend_queue.get()
 
@@ -1195,5 +1266,3 @@ class EdgeFrontEnd(WinFrontEnd):
                 elif data[0] == "stop":
                     Log("Frontend Stopped.")
                     break
-                #e = time.time()
-                #print("queue tiem = ", (e-s))

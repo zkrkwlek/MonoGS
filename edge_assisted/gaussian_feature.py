@@ -54,6 +54,7 @@ def convert_xyz(rounded_keypoints,color,depth):
     depth_values = depth[rounded_keypoints[:, 1], rounded_keypoints[:, 0]]
     color_values = color[rounded_keypoints[:, 1], rounded_keypoints[:, 0]]
     valid_mask = depth_values > 0
+
     valid_keypoints = rounded_keypoints[valid_mask]
     valid_depths = depth_values[valid_mask]
     valid_colors = color_values[valid_mask]
@@ -85,6 +86,14 @@ def pixels_to_pc(points, R, t, fx, fy, cx, cy):
 
 #points1 : gaussian
 #points2 :
+
+def find_correspondence_with_dist(points1, points2, th = 3.0):
+    dists = torch.cdist(points1, points2)  # (N, M)
+    min_dists, min_indices = dists.min(dim=1)
+    #gauss_matching_indices = min_indices.clone()
+    min_indices[min_dists > th] = -1
+    return min_indices
+
 def find_correspondence(points1, points2):
     matches_gauss_to_kp = (points1.unsqueeze(1) == points2).all(dim=2)
     gauss_matching_indices = matches_gauss_to_kp.float().argmax(dim=1)
@@ -94,6 +103,92 @@ def find_correspondence(points1, points2):
     unmatched_keypoints_mask = ~matches_kp_to_gauss
 
     return gauss_matching_indices, unmatched_keypoints_mask
+
+def calculate_keypoint_mask(keypoints, w, h):
+    """
+    keypoints: (N, 2) tensor, 각 행은 (y, x) 좌표
+    w, h: 마스크의 너비와 높이
+    반환: (1, h, w) boolean mask, keypoints 위치만 True
+    """
+    mask = torch.zeros((h, w), dtype=torch.bool, device=keypoints.device)
+    # keypoints가 이미지 범위 내에 있는 것만 선택 (안전)
+    valid = (keypoints[:, 0] >= 0) & (keypoints[:, 0] < h) & (keypoints[:, 1] >= 0) & (keypoints[:, 1] < w)
+    kp_y = keypoints[valid, 0].int()
+    kp_x = keypoints[valid, 1].int()
+    mask[kp_y, kp_x] = True
+    return mask.unsqueeze(0)
+
+def calculate_feature_mask_with_closest(keypoints, w, h, radius=7):
+    N = keypoints.shape[0]
+
+    ys = torch.arange(h, device=keypoints.device).reshape(h, 1)
+    xs = torch.arange(w, device=keypoints.device).reshape(1, w)
+
+    kp_y = keypoints[:, 0].reshape(N, 1, 1)
+    kp_x = keypoints[:, 1].reshape(N, 1, 1)
+
+    dist2 = (ys - kp_y) ** 2 + (xs - kp_x) ** 2        # (N, h, w)
+    patch_mask = dist2 <= radius ** 2                   # (N, h, w)
+    mask = patch_mask.any(dim=0, keepdim=True)          # (1, h, w) bool
+
+    # 각 픽셀별 모든 키포인트와의 거리 중 최솟값 인덱스
+    dist2_per_pixel = dist2.permute(1, 2, 0)            # (h, w, N)
+    closest_idx = torch.argmin(dist2_per_pixel, dim=2)  # (h, w)
+
+    # 반지름 밖은 -1로 처리하여 마스킹
+    outside_mask = ~mask[0]                             # (h, w) bool
+    closest_idx[outside_mask] = -1
+
+    return mask, closest_idx
+
+def calculate_feature_mask(keypoints,w, h,radius = 7):
+
+    N = keypoints.shape[0]
+
+    # (h, 1), (1, w): 픽셀 좌표 그리드
+    ys = torch.arange(h).reshape(h, 1).cuda()
+    xs = torch.arange(w).reshape(1, w).cuda()
+
+    # (N, 1, 1): 특징점 좌표 확장
+    kp_y = keypoints[:, 0].reshape(N, 1, 1)
+    kp_x = keypoints[:, 1].reshape(N, 1, 1)
+
+    # (N, h, w): 각 특징점과 모든 픽셀 간 거리 제곱
+    dist2 = (ys - kp_y) ** 2 + (xs - kp_x) ** 2
+
+    # 반지름 이내: True
+    patch_mask = dist2 <= radius ** 2  # (N, h, w)
+
+    # 여러 특징점의 패치가 겹치면 True
+    mask = patch_mask.any(dim=0, keepdim=True)  # (1, h, w) bool
+    return mask
+
+def calculate_bbox_mask(boxes, w, h):
+
+    boxes = torch.tensor([[30, 50, 40, 20], [100, 70, 30, 60]]).cuda()  # (N, 4): [x, y, w, h]
+
+    N = boxes.shape[0]
+
+    # 각 박스의 x1, y1, x2, y2 좌표 계산
+    x1 = boxes[:, 0]
+    y1 = boxes[:, 1]
+    x2 = x1 + boxes[:, 2]
+    y2 = y1 + boxes[:, 3]
+
+    # (h, 1), (1, w): 픽셀 좌표 그리드
+    ys = torch.arange(h, device=boxes.device).reshape(h, 1)
+    xs = torch.arange(w, device=boxes.device).reshape(1, w)
+
+    # (N, h, w): 각 박스별로 해당 픽셀에 포함되는지 벡터화 계산
+    in_box = (
+            (ys >= y1[:, None, None]) & (ys < y2[:, None, None]) &
+            (xs >= x1[:, None, None]) & (xs < x2[:, None, None])
+    )  # (N, h, w) bool
+
+    # 여러 박스가 겹치면 True
+    mask = in_box.any(dim=0, keepdim=True)  # (1, h, w) bool
+
+    return mask
 
 def projection(_X, R, t, fx, fy, cx, cy, w, h):
     Xw = _X.to(R.dtype)
@@ -137,11 +232,12 @@ def project_pc_to_pixel(points, R, t, fx, fy, cx, cy, w, h):
     u = (fx * X / Z + cx)#.astype(np.int32)
     v = (fy * Y / Z + cy)#.astype(np.int32)
 
-    valid = (points[:, 2] > 0) & (u >= 0) & (u < w) & (v >= 0) & (v < h)
-    valid_u = u[valid]
-    valid_v = v[valid]
-
-    return torch.stack((valid_u, valid_v), axis=1), valid#.detach().cpu().numpy()
+    valid = (Z > 0) & (u >= 0) & (u < w) & (v >= 0) & (v < h)
+    #valid_u = u[valid]
+    #alid_v = v[valid]
+    ##리턴을 전체로 변경. 에러를 거를려면 직접 valid 수행.
+    ##프로젝션, 뎁스, 유효 마스크 크기를 동일하게 함.
+    return torch.stack((u, v), axis=1), Z, valid#.detach().cpu().numpy()
 
 def project_3d_to_pixel(self,
                     point_3d: torch.Tensor,

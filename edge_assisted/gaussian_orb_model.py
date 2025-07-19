@@ -23,7 +23,7 @@ from gaussian_splatting.utils.general_utils import (
 from gaussian_splatting.utils.graphics_utils import BasicPointCloud, getWorld2View2
 from gaussian_splatting.utils.sh_utils import RGB2SH
 
-from edge_assisted.gaussian_feature import calculate_feature_mask,calculate_bbox_mask, project_pc_to_pixel, visualize_pc,convert_xyz, pixels_to_pc,find_correspondence
+from edge_assisted.gaussian_feature import calculate_keypoint_mask,calculate_feature_mask,calculate_bbox_mask, project_pc_to_pixel, visualize_pc,convert_xyz, pixels_to_pc,find_correspondence
 from edge_assisted.gaussian_feature import GaussianPointManager
 
 ###일단 densification 같은 것에 대응하는지 확인
@@ -43,12 +43,12 @@ class GaussianOrbModel(GaussianModel):
     def clone(self, indices):
         new_gaussians = GaussianOrbModel(self.max_sh_degree, self.config)
 
-        new_gaussians._xyz = self._xyz[indices].clone()
-        new_gaussians._features_dc = self._features_dc[indices].clone()
-        new_gaussians._features_rest = self._features_rest[indices].clone()
-        new_gaussians._scaling = self._scaling[indices].clone()
-        new_gaussians._rotation = self._rotation[indices].clone()
-        new_gaussians._opacity = self._opacity[indices].clone()
+        new_gaussians._xyz = self._xyz[indices]
+        new_gaussians._features_dc = self._features_dc[indices]
+        new_gaussians._features_rest = self._features_rest[indices]
+        new_gaussians._scaling = self._scaling[indices]
+        new_gaussians._rotation = self._rotation[indices]
+        new_gaussians._opacity = self._opacity[indices]
 
         return new_gaussians
 
@@ -58,9 +58,32 @@ class GaussianOrbModel(GaussianModel):
         image_ab = torch.clamp(image_ab, 0.0, 1.0)
         rgb_raw = (image_ab * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy()
 
+        #mask = torch.ones((cam.image_height, cam.image_width), device='cuda', dtype=torch.bool)
+        if self.get_xyz.shape[0] > 0 :
+            projections, depths, valid_proj = project_pc_to_pixel(self.get_xyz, cam.R, cam.T,
+                                                              cam.fx, cam.fy, cam.cx, cam.cy,
+                                                              cam.image_width, cam.image_height)
+            gaussian_mask = calculate_keypoint_mask(projections[valid_proj], cam.image_width, cam.image_height)
+            gaussian_mask = ~gaussian_mask
+        else:
+            gaussian_mask = torch.ones((cam.image_height, cam.image_width), device='cuda', dtype=torch.bool)
+        feature_mask = torch.zeros((cam.image_height, cam.image_width), device='cuda', dtype=torch.bool)
+        box_mask = torch.zeros((cam.image_height, cam.image_width), device='cuda', dtype=torch.bool)
+        if keypoints is not None:
+            feature_mask = calculate_keypoint_mask(keypoints, cam.image_width, cam.image_height)
+            #feature_mask = feature_mask.cpu()
+
+        if boxes is not None:
+            box_mask = calculate_bbox_mask(boxes, cam.image_width, cam.image_height)
+            #box_mask = box_mask.cpu()
+        base_mask = torch.logical_and(gaussian_mask, torch.logical_and(feature_mask == 0, box_mask == 0)).squeeze(0).cpu().numpy()
+        #index = torch.where(~mask)[0].cpu().numpy()
+
         if depthmap is not None:
+            tmp_depth = depthmap.copy()
+            tmp_depth[~base_mask] = 0.0
             rgb = o3d.geometry.Image(rgb_raw.astype(np.uint8))
-            depth = o3d.geometry.Image(depthmap.astype(np.float32))
+            depth = o3d.geometry.Image(tmp_depth.astype(np.float32))
         else:
             depth_raw = cam.depth
             if depth_raw is None:
@@ -76,13 +99,43 @@ class GaussianOrbModel(GaussianModel):
             rgb = o3d.geometry.Image(rgb_raw.astype(np.uint8))
             depth = o3d.geometry.Image(depth_raw.astype(np.float32))
 
+        fused_point_cloud, features, scales, rots, opacities,new_isfeature, match_index, new_obs = self.create_pcd_from_image_and_depth(cam, rgb, depth, init)
+
         if keypoints is not None:
-            pass
-
+            t_a = time.time()
+            tmp_depth = depthmap.copy()
+            feature_mask = torch.logical_and(gaussian_mask, feature_mask)
+            tmp_depth[(~feature_mask).squeeze(0).cpu().numpy()] = 0.0
+            feature_depth = o3d.geometry.Image(tmp_depth.astype(np.float32))
+            fused_point_cloud2, features2, scales2, rots2, opacities2, new_isfeature2, match_index2, new_obs2 = self.create_pcd_from_image_and_depth(cam, rgb, feature_depth, init, keypoints=keypoints)
+            t_b = time.time()
+            fused_point_cloud = torch.cat((fused_point_cloud, fused_point_cloud2), dim=0)
+            features = torch.cat((features, features2), dim=0)
+            scales = torch.cat((scales, scales2), dim=0)
+            rots = torch.cat((rots, rots2), dim=0)
+            opacities = torch.cat((opacities, opacities2), dim=0)
+            new_isfeature = torch.cat((new_isfeature, new_isfeature2), dim=0)
+            match_index = torch.cat((match_index, match_index2), dim=0)
+            new_obs = torch.cat((new_obs, new_obs2), dim=0)
+            t_c = time.time()
+            #print('new gaussians : feature', t_b-t_a, t_c-t_b)
         if boxes is not None:
-            pass
+            tmp_depth = depthmap.copy()
+            box_mask = torch.logical_and(gaussian_mask, box_mask)
+            tmp_depth[(~box_mask).squeeze(0).cpu().numpy()] = 0.0
+            box_depth = o3d.geometry.Image(tmp_depth.astype(np.float32))
+            fused_point_cloud2, features2, scales2, rots2, opacities2, new_isfeature2, match_index2, new_obs2 = self.create_pcd_from_image_and_depth(cam, rgb, box_depth, init, boxes=boxes)
 
-        return self.create_pcd_from_image_and_depth(cam, rgb, depth, init,keypoints=keypoints, boxes = boxes)
+            fused_point_cloud = torch.cat((fused_point_cloud, fused_point_cloud2), dim=0)
+            features = torch.cat((features, features2), dim=0)
+            scales = torch.cat((scales, scales2), dim=0)
+            rots = torch.cat((rots, rots2), dim=0)
+            opacities = torch.cat((opacities, opacities2), dim=0)
+            new_isfeature = torch.cat((new_isfeature, new_isfeature2), dim=0)
+            match_index = torch.cat((match_index, match_index2), dim=0)
+            new_obs = torch.cat((new_obs, new_obs2), dim=0)
+
+        return fused_point_cloud, features, scales, rots, opacities,new_isfeature, match_index, new_obs
 
     def create_pcd_from_image_and_depth(self, cam, rgb, depth, init=False, keypoints=None, boxes = None):
         if init:
@@ -103,31 +156,6 @@ class GaussianOrbModel(GaussianModel):
 
         W2C = getWorld2View2(cam.R, cam.T).cpu().numpy()
 
-        if boxes is not None:
-            mask = calculate_bbox_mask(boxes, cam.image_width, cam.image_height)
-            rgbd_object = o3d.geometry.RGBDImage.create_from_color_and_depth(
-                rgb,
-                depth[mask],
-                depth_scale=1.0,
-                depth_trunc=100.0,
-                convert_rgb_to_intensity=False,
-            )
-
-            pcd_tmp_object = o3d.geometry.PointCloud.create_from_rgbd_image(
-                rgbd_object,
-                o3d.camera.PinholeCameraIntrinsic(
-                    cam.image_width,
-                    cam.image_height,
-                    cam.fx,
-                    cam.fy,
-                    cam.cx,
-                    cam.cy,
-                ),
-                extrinsic=W2C,
-                project_valid_depth_only=True,
-            )
-            print('object test', pcd_tmp_object.shape, torch.count_nonzero(mask))
-
         pcd_tmp = o3d.geometry.PointCloud.create_from_rgbd_image(
             rgbd,
             o3d.camera.PinholeCameraIntrinsic(
@@ -144,9 +172,14 @@ class GaussianOrbModel(GaussianModel):
 
         #farthest_point_down_sample(3000)
         #pcd_tmp = pcd_tmp.voxel_down_sample(voxel_size=0.03)
+        if keypoints is not None or boxes is not None:
+            downsample_factor /= 3.0
         pcd_tmp = pcd_tmp.random_down_sample(1.0 / downsample_factor)
+        new_xyz = np.asarray(pcd_tmp.points)
+        new_rgb = np.asarray(pcd_tmp.colors)
 
-        if keypoints is not None:
+        """
+        if keypoints is not None and False:
 
             mask = calculate_feature_mask(keypoints, cam.image_width, cam.image_height, radius=1)
             rgbd_feature = o3d.geometry.RGBDImage.create_from_color_and_depth(
@@ -248,7 +281,7 @@ class GaussianOrbModel(GaussianModel):
             new_isfeature = torch.zeros(N1, device='cuda')
             new_obs = torch.full((N1, 2), -1.0, device="cuda")
             match_index = torch.full((new_xyz.shape[0]),-1)
-
+        """
         pcd = BasicPointCloud(
             points=new_xyz, colors=new_rgb, normals=np.zeros((new_xyz.shape[0], 3))
         )
@@ -283,6 +316,29 @@ class GaussianOrbModel(GaussianModel):
                 (fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"
             )
         )
+
+        N1 = fused_point_cloud.shape[0]
+        if keypoints is not None:
+            temp_points, _, temp_valid = project_pc_to_pixel(fused_point_cloud, cam.R, cam.T, cam.fx, cam.fy, cam.cx, cam.cy,
+                                                             cam.image_width, cam.image_height)
+            temp_keypoints = torch.round(keypoints).int()
+            match_index, unmatch_mask = find_correspondence(temp_points, temp_keypoints)
+
+            temp_index = torch.where(match_index > -1)[0]  # 매칭 된 결과값
+
+            new_isfeature = torch.zeros(N1, device='cuda')
+            new_isfeature[temp_index] = True
+
+            new_obs = torch.full((N1, 2), -1.0, device="cuda")
+            new_obs[temp_index] = keypoints[match_index[temp_index]]
+
+            print('new gaussian feature test',temp_points.shape, torch.count_nonzero(temp_valid), match_index.shape, unmatch_mask.shape)
+        else:
+            new_isfeature = torch.zeros(N1, device='cuda')
+            new_obs = torch.full((N1, 2), -1.0, device="cuda")
+            match_index = torch.full((N1,), -1.0, device="cuda")
+
+
         if new_xyz.shape[0] != fused_point_cloud.shape[0]:
             print('error new gaussian', new_xyz.shape, fused_point_cloud.shape)
         return fused_point_cloud, features, scales, rots, opacities,new_isfeature, match_index, new_obs
@@ -299,7 +355,8 @@ class GaussianOrbModel(GaussianModel):
         if len(frame.objects) == 0:
             boxes = None
         else:
-            boxes = torch.tensor(list(frame.objects.values()), device='cuda')
+            arr = np.array(list(frame.objects.values()))
+            boxes = torch.from_numpy(arr).to('cuda')
 
         fused_point_cloud, features, scales, rots, opacities, new_isfeature, tmp_new_observation_indices, new_observation_points = (
             self.create_pcd_from_image(cam_info, init, scale=scale, depthmap=depthmap, keypoints=keypoints, boxes = boxes)

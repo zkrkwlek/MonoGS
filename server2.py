@@ -70,7 +70,7 @@ def predict(message):
 def resdepthanything(id,src):
 
 
-    if not slam.CheckFrame(id):
+    #if not slam.CheckFrame(id):
         #print("resdepthanything", id)
         try:
             res_pose = sess.post(
@@ -124,14 +124,16 @@ def resdepthanything(id,src):
         except ValueError as e:
             #print(f"error : {e}")
             pass
-    else:
-        print("?????",id)
-    """
-    depth_normalized = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-    colored = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_AUTUMN)
-    cv2.imshow("depth", colored)
-    cv2.waitKey(1)
-    """
+    #else:
+    #print("?????",id)
+    
+        """
+        ##depth 시각화
+        depth_normalized = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+        colored = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_AUTUMN)
+        cv2.imshow("depth", colored)
+        cv2.waitKey(1)
+        """
 
 def ObjectMapCreation(id,src):
     res = sess.post(FACADE_SERVER_ADDR + "/Download?keyword=" + "ObjectMapCreation" + "&id=" + str(id) + "&src=" + src,"")
@@ -158,7 +160,8 @@ def ObjectMapUpdate(id,src):
     oid = int(array[0])
     fid = int(array[1])
     bbox = array[2:6]
-
+    slam.AddObjectBBox(fid, oid, bbox)
+    """
     if not slam.CheckFrame(fid):
         #Frame 추가
         t = array[6:9]
@@ -180,11 +183,10 @@ def ObjectMapUpdate(id,src):
 
     else:
         print('already exist ',fid, src)
+    """
     #print(src, id, array[2:6], array[6:9],array[9:18])
-
     #print("Find object", oid)
     #object = slam.objects[oid]
-
     """
     if not object.initialized and not object.used:
         slam.queue.put(["init", oid, fid, None])
