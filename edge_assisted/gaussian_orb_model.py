@@ -30,7 +30,7 @@ from edge_assisted.gaussian_feature import GaussianPointManager
 ###이 후 코드 추가
 
 class GaussianOrbModel(GaussianModel):
-    def __init__(self, sh_degree : int, config = None):
+    def __init__(self, sh_degree : int, config = None, opt_params = None):
         super().__init__(sh_degree, config)
 
         self.isfeatured = torch.empty(0, device="cuda").bool()
@@ -39,6 +39,8 @@ class GaussianOrbModel(GaussianModel):
 
         self.unique_gaussian_ids = torch.empty(0, device = "cuda").long()
         self.global_gaussian_counter = 0
+
+        self.opt_params = opt_params
 
     def clone(self, indices):
         new_gaussians = GaussianOrbModel(self.max_sh_degree, self.config)
@@ -51,38 +53,99 @@ class GaussianOrbModel(GaussianModel):
         new_gaussians._opacity = self._opacity[indices]
 
         return new_gaussians
+    """
+    def compute_2d_gaussian_weights(self,
+            means_2d,  # (N, 2): 각 2D 가우시안의 중심 (projection된 위치)
+            covs_2d,  # (N, 2, 2): 각 2D 가우시안의 2x2 공분산
+            opacities,  # (N,): 각 가우시안의 불투명도 (alpha o)
+            W, H
+    ):
+        N = means_2d.shape[0]
+        ys, xs = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
+        pixel_coords = torch.stack([xs, ys], dim=-1).float().cuda()
 
-    def create_pcd_from_image(self, cam_info, init=False, scale=2.0, depthmap=None, keypoints=None, boxes = None):
+        # (H, W, 2) → (1, H*W, 2) → (N, H*W, 2)
+        pixels = pixel_coords.view(1, -1, 2).expand(N, -1, -1)
+        means = means_2d[:, None, :]  # (N, 1, 2)
+        diffs = pixels - means  # (N, H*W, 2)
+
+        # (N, 2, 2) → (N, 1, 2, 2)
+        covs = covs_2d[:, None, :, :]  # (N, 1, 2, 2)
+        covs_inv = torch.linalg.pinv(covs)  # (N, 1, 2, 2)
+        covs_det = torch.det(covs)[..., 0]  # (N,)
+
+        # mahalanobis 거리: (N, H*W)
+        # (N, H*W, 1, 2) × (N, 1, 2, 2) → (N, H*W, 1, 2) → squeeze(-2): (N, H*W, 2)
+        mahal = torch.matmul(diffs.unsqueeze(-2), covs_inv).squeeze(-2)  # (N, H*W, 2)
+        mahal = (mahal * diffs).sum(-1)  # (N, H*W)
+
+        norm_factor = 1.0 / (2.0 * torch.pi * torch.sqrt(covs_det + 1e-6))  # (N,)
+        norm_factor = norm_factor[:, None]  # (N, 1)
+
+        # 2D 가우시안 PDF
+        gauss_pdf = norm_factor * torch.exp(-0.5 * mahal)  # (N, H*W)
+
+        # 픽셀 별 alpha 영향도 계산 (가우시안 opacity 반영)
+        weights = gauss_pdf * opacities[:, None]  # (N, H*W)
+        weights = weights.view(N, H, W)  # (N, H, W)
+        return weights
+
+    def convert_cov3d_to_cov2d(self, R, t, fx, fy):
+        means_cam = self.get_xyz @ R.T + t
+
+        x, y, z = means_cam[:, 0], means_cam[:, 1], means_cam[:, 2]
+
+        # 자코비안 J: (N, 2, 3)
+        J = torch.zeros((x.shape[0], 2, 3), device='cuda', dtype=x.dtype)
+        J[:, 0, 0] = fx / z
+        J[:, 0, 2] = -fx * x / (z * z)
+        J[:, 1, 1] = fy / z
+        J[:, 1, 2] = -fy * y / (z * z)
+
+        # 카메라 좌표계로 공분산 이동: (N, 3, 3)
+
+        M = self.quaternion_to_rotation_matrix()
+        cov3d = M @ torch.diag_embed(self.get_scaling ** 2) @ M.transpose(-1, -2)
+        if R.ndim == 2:
+            covs_cam = R @ cov3d @ R.T
+        else:  # (N, 3, 3)
+            covs_cam = torch.bmm(R, torch.bmm(cov3d, R.transpose(1, 2)))
+
+        # 최종 2D 공분산: (N, 2, 2)
+        J_cov = torch.bmm(J, torch.bmm(covs_cam, J.transpose(1, 2)))
+        return J_cov
+
+    def quaternion_to_rotation_matrix(self):  # q: (N, 4) -> (N, 3, 3)
+        # q: (N, 4) with xyzw order
+        q = self.get_rotation
+        x, y, z, w = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+        N = q.size(0)
+        xx = x * x;
+        yy = y * y;
+        zz = z * z
+        ww = w * w;
+        xy = x * y;
+        xz = x * z;
+        yz = y * z
+        wx = w * x;
+        wy = w * y;
+        wz = w * z
+        R = torch.stack([
+            1 - 2 * (yy + zz), 2 * (xy - wz), 2 * (xz + wy),
+            2 * (xy + wz), 1 - 2 * (xx + zz), 2 * (yz - wx),
+            2 * (xz - wy), 2 * (yz + wx), 1 - 2 * (xx + yy)
+        ], dim=1).reshape(N, 3, 3)
+        return R
+    """
+    def create_pcd_from_image(self, cam_info, rgb, mask, init=False, scale=2.0, depthmap=None, keypoints=None, boxes = None, downsample_factor = 128):
         cam = cam_info
-        image_ab = (torch.exp(cam.exposure_a)) * cam.original_image + cam.exposure_b
-        image_ab = torch.clamp(image_ab, 0.0, 1.0)
-        rgb_raw = (image_ab * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy()
-
-        #mask = torch.ones((cam.image_height, cam.image_width), device='cuda', dtype=torch.bool)
-        if self.get_xyz.shape[0] > 0 :
-            projections, depths, valid_proj = project_pc_to_pixel(self.get_xyz, cam.R, cam.T,
-                                                              cam.fx, cam.fy, cam.cx, cam.cy,
-                                                              cam.image_width, cam.image_height)
-            gaussian_mask = calculate_keypoint_mask(projections[valid_proj], cam.image_width, cam.image_height)
-            gaussian_mask = ~gaussian_mask
-        else:
-            gaussian_mask = torch.ones((cam.image_height, cam.image_width), device='cuda', dtype=torch.bool)
-        feature_mask = torch.zeros((cam.image_height, cam.image_width), device='cuda', dtype=torch.bool)
-        box_mask = torch.zeros((cam.image_height, cam.image_width), device='cuda', dtype=torch.bool)
-        if keypoints is not None:
-            feature_mask = calculate_keypoint_mask(keypoints, cam.image_width, cam.image_height)
-            #feature_mask = feature_mask.cpu()
-
-        if boxes is not None:
-            box_mask = calculate_bbox_mask(boxes, cam.image_width, cam.image_height)
-            #box_mask = box_mask.cpu()
-        base_mask = torch.logical_and(gaussian_mask, torch.logical_and(feature_mask == 0, box_mask == 0)).squeeze(0).cpu().numpy()
-        #index = torch.where(~mask)[0].cpu().numpy()
+        #image_ab = (torch.exp(cam.exposure_a)) * cam.original_image + cam.exposure_b
+        #image_ab = torch.clamp(image_ab, 0.0, 1.0)
+        #rgb_raw = (image_ab * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy()
 
         if depthmap is not None:
             tmp_depth = depthmap.copy()
-            tmp_depth[~base_mask] = 0.0
-            rgb = o3d.geometry.Image(rgb_raw.astype(np.uint8))
+            tmp_depth[~mask] = 0.0
             depth = o3d.geometry.Image(tmp_depth.astype(np.float32))
         else:
             depth_raw = cam.depth
@@ -96,18 +159,18 @@ class GaussianOrbModel(GaussianModel):
                     * 0.05
                 ) * scale
 
-            rgb = o3d.geometry.Image(rgb_raw.astype(np.uint8))
+            #rgb = o3d.geometry.Image(rgb_raw.astype(np.uint8))
             depth = o3d.geometry.Image(depth_raw.astype(np.float32))
 
-        fused_point_cloud, features, scales, rots, opacities,new_isfeature, match_index, new_obs = self.create_pcd_from_image_and_depth(cam, rgb, depth, init)
-
+        """
+        fused_point_cloud, features, scales, rots, opacities,new_isfeature, match_index, new_obs =
         if keypoints is not None:
             t_a = time.time()
             tmp_depth = depthmap.copy()
             feature_mask = torch.logical_and(gaussian_mask, feature_mask)
             tmp_depth[(~feature_mask).squeeze(0).cpu().numpy()] = 0.0
             feature_depth = o3d.geometry.Image(tmp_depth.astype(np.float32))
-            fused_point_cloud2, features2, scales2, rots2, opacities2, new_isfeature2, match_index2, new_obs2 = self.create_pcd_from_image_and_depth(cam, rgb, feature_depth, init, keypoints=keypoints)
+            fused_point_cloud2, features2, scales2, rots2, opacities2, new_isfeature2, match_index2, new_obs2 = self.create_pcd_from_image_and_depth(cam, rgb, feature_depth, init, keypoints=keypoints, downsample_factor = 32)
             t_b = time.time()
             fused_point_cloud = torch.cat((fused_point_cloud, fused_point_cloud2), dim=0)
             features = torch.cat((features, features2), dim=0)
@@ -124,7 +187,7 @@ class GaussianOrbModel(GaussianModel):
             box_mask = torch.logical_and(gaussian_mask, box_mask)
             tmp_depth[(~box_mask).squeeze(0).cpu().numpy()] = 0.0
             box_depth = o3d.geometry.Image(tmp_depth.astype(np.float32))
-            fused_point_cloud2, features2, scales2, rots2, opacities2, new_isfeature2, match_index2, new_obs2 = self.create_pcd_from_image_and_depth(cam, rgb, box_depth, init, boxes=boxes)
+            fused_point_cloud2, features2, scales2, rots2, opacities2, new_isfeature2, match_index2, new_obs2 = self.create_pcd_from_image_and_depth(cam, rgb, box_depth, init, boxes=boxes, downsample_factor = 32)
 
             fused_point_cloud = torch.cat((fused_point_cloud, fused_point_cloud2), dim=0)
             features = torch.cat((features, features2), dim=0)
@@ -134,14 +197,11 @@ class GaussianOrbModel(GaussianModel):
             new_isfeature = torch.cat((new_isfeature, new_isfeature2), dim=0)
             match_index = torch.cat((match_index, match_index2), dim=0)
             new_obs = torch.cat((new_obs, new_obs2), dim=0)
+        """
+        return self.create_pcd_from_image_and_depth(cam, rgb, depth, init, keypoints = keypoints, boxes = boxes, downsample_factor = downsample_factor)
 
-        return fused_point_cloud, features, scales, rots, opacities,new_isfeature, match_index, new_obs
+    def create_pcd_from_image_and_depth(self, cam, rgb, depth, init=False, keypoints=None, boxes = None, downsample_factor = 128):
 
-    def create_pcd_from_image_and_depth(self, cam, rgb, depth, init=False, keypoints=None, boxes = None):
-        if init:
-            downsample_factor = self.config["Dataset"]["pcd_downsample_init"]
-        else:
-            downsample_factor = self.config["Dataset"]["pcd_downsample"]
         point_size = self.config["Dataset"]["point_size"]
         if "adaptive_pointsize" in self.config["Dataset"]:
             if self.config["Dataset"]["adaptive_pointsize"]:
@@ -172,116 +232,10 @@ class GaussianOrbModel(GaussianModel):
 
         #farthest_point_down_sample(3000)
         #pcd_tmp = pcd_tmp.voxel_down_sample(voxel_size=0.03)
-        if keypoints is not None or boxes is not None:
-            downsample_factor /= 3.0
         pcd_tmp = pcd_tmp.random_down_sample(1.0 / downsample_factor)
         new_xyz = np.asarray(pcd_tmp.points)
         new_rgb = np.asarray(pcd_tmp.colors)
 
-        """
-        if keypoints is not None and False:
-
-            mask = calculate_feature_mask(keypoints, cam.image_width, cam.image_height, radius=1)
-            rgbd_feature = o3d.geometry.RGBDImage.create_from_color_and_depth(
-                rgb,
-                depth[mask],
-                depth_scale=1.0,
-                depth_trunc=100.0,
-                convert_rgb_to_intensity=False,
-            )
-
-            pcm_tmp_feature = o3d.geometry.PointCloud.create_from_rgbd_image(
-                rgbd_feature,
-                o3d.camera.PinholeCameraIntrinsic(
-                    cam.image_width,
-                    cam.image_height,
-                    cam.fx,
-                    cam.fy,
-                    cam.cx,
-                    cam.cy,
-                ),
-                extrinsic=W2C,
-                project_valid_depth_only=True,
-            )
-            print('feature test', pcm_tmp_feature.shape, torch.count_nonzero(mask))
-
-
-            #프로젝션
-            #키포인트 없으면 추가
-            #temp_keypoints =torch.round(torch.from_numpy(np.asarray(keypoints)).cuda()).int()
-            #temp_backup_points는 pcd로 생성한 포인트
-            temp_keypoints = torch.round(keypoints).int()
-            temp_backup_points = np.asarray(pcd_tmp.points)
-            temp_backup_colors = np.asarray(pcd_tmp.colors)
-
-            #temp_valid는 temp_backup_points에서 이미지 안의 포인트를 의미함. = pcd의 수보다 작을 수 있음.
-            temp_points=torch.from_numpy(temp_backup_points).cuda()
-            temp_points, _, temp_valid = project_pc_to_pixel(temp_points, cam.R, cam.T, cam.fx, cam.fy, cam.cx, cam.cy, cam.image_width, cam.image_height)
-            temp_points = torch.round(temp_points[temp_valid]).int()
-
-            rgb = torch.from_numpy(np.asarray(rgb)).cuda()
-            depth = torch.from_numpy(np.asarray(depth)).cuda()
-
-            #새로 생성하는 gaussian 포인트에서 매칭 대응쌍, 키포인트에서 매칭 안된 index mask
-            #pcd와 키포인트 중 매치 된 포인트와 안된 키포인트를 의미
-            #유니크 키포인트는 매치가 안된 키포인트임.
-            match_index, unmatch_mask = find_correspondence(temp_points, temp_keypoints)
-            unique_keypoints = temp_keypoints[unmatch_mask]
-            temp_unmatched_keypoints_index = torch.arange(0,unmatch_mask.size()[0]).cuda()[unmatch_mask]
-
-            #매치 안된 유니크 키포인트 만큼 추가
-            add_points, add_colors, valid_depth_mask = convert_xyz(unique_keypoints, rgb, depth)
-            add_points = pixels_to_pc(add_points, cam.R, cam.T, cam.fx, cam.fy, cam.cx, cam.cy)
-
-            add_points = add_points.cpu().detach().numpy()
-            add_colors = add_colors.cpu().detach().numpy()/255
-
-            temp_valid = temp_valid.cpu().numpy()
-            new_xyz = np.concatenate((temp_backup_points[temp_valid], add_points), axis=0)
-            new_rgb = np.concatenate((temp_backup_colors[temp_valid], add_colors),axis=0)
-
-            N1 = np.count_nonzero(temp_valid) #기존에 랜덤하게 생성된 포인트
-            N2 = torch.count_nonzero(valid_depth_mask)#unique_keypoints.shape[0]    #랜덤 생성된 값을 제외한 키포인트
-            #Ncol = self.observations.shape[1]
-
-
-            #그리고 pcd로 생성된 수와 같아야 함. 그 중에서 temp_valid가 true인 애들
-            #isfeature, obs, match_index를 추가해야 함. 그 수는 유니크 키포인트와 같음.
-            #add_point에서 valid_mask를 고려해야 할 듯. 이게 가끔 에러가 있음.
-            temp_index = torch.where(match_index > -1)[0] #매칭 된 결과값
-
-            new_isfeature = torch.zeros(N1, device = 'cuda')
-            new_isfeature[temp_index] = True
-
-            #기존 pcd 데이터
-            new_obs = torch.full((N1, 2), -1.0, device="cuda")
-            new_obs[temp_index] = keypoints[match_index[temp_index]]
-
-            temp_unmatched_keypoints_index = temp_unmatched_keypoints_index[valid_depth_mask]
-            new_isfeature = torch.cat((new_isfeature,torch.ones(N2, device='cuda')), axis = 0)
-            new_obs = torch.cat((new_obs, keypoints[temp_unmatched_keypoints_index]), axis=0)
-            match_index = torch.concatenate((match_index, temp_unmatched_keypoints_index), axis = 0)
-
-            if new_obs.shape[0] != new_xyz.shape[0]:
-                print('new gaussian error case', new_obs.shape[0], match_index.shape[0], new_isfeature.shape[0])
-                print(torch.count_nonzero(valid_depth_mask),add_points.shape[0],temp_unmatched_keypoints_index.shape[0])
-
-            #if N1 != new_obs.shape[0]:
-            #    print('err new gaussians : asdf', N1, new_obs.shape, temp_index.shape, temp_unmatched_keypoints_index.shape, torch.count_nonzero(temp_unmatched_keypoints_index > -1))
-
-            #print('bb',match_index.shape,new_xyz.shape, torch.count_nonzero(match_index > -1), torch.count_nonzero(new_obs > -1)/2)
-            #print('aa', temp_valid.shape, temp_backup_points[temp_valid].shape,temp_unmatched_keypoints_index.shape, temp_keypoints.shape)
-            #matched_mask = match_index > -1
-
-        else:
-            new_xyz = np.asarray(pcd_tmp.points)
-            new_rgb = np.asarray(pcd_tmp.colors)
-
-            N1 = new_xyz.shape[0]
-            new_isfeature = torch.zeros(N1, device='cuda')
-            new_obs = torch.full((N1, 2), -1.0, device="cuda")
-            match_index = torch.full((new_xyz.shape[0]),-1)
-        """
         pcd = BasicPointCloud(
             points=new_xyz, colors=new_rgb, normals=np.zeros((new_xyz.shape[0], 3))
         )
@@ -321,6 +275,7 @@ class GaussianOrbModel(GaussianModel):
         if keypoints is not None:
             temp_points, _, temp_valid = project_pc_to_pixel(fused_point_cloud, cam.R, cam.T, cam.fx, cam.fy, cam.cx, cam.cy,
                                                              cam.image_width, cam.image_height)
+            temp_points = torch.round(temp_points).int()
             temp_keypoints = torch.round(keypoints).int()
             match_index, unmatch_mask = find_correspondence(temp_points, temp_keypoints)
 
@@ -332,7 +287,7 @@ class GaussianOrbModel(GaussianModel):
             new_obs = torch.full((N1, 2), -1.0, device="cuda")
             new_obs[temp_index] = keypoints[match_index[temp_index]]
 
-            print('new gaussian feature test',temp_points.shape, torch.count_nonzero(temp_valid), match_index.shape, unmatch_mask.shape)
+            print('new gaussian feature test', fused_point_cloud.shape, temp_points.shape, torch.count_nonzero(temp_index), match_index.shape, unmatch_mask.shape, temp_keypoints.shape)
         else:
             new_isfeature = torch.zeros(N1, device='cuda')
             new_obs = torch.full((N1, 2), -1.0, device="cuda")
@@ -344,67 +299,115 @@ class GaussianOrbModel(GaussianModel):
         return fused_point_cloud, features, scales, rots, opacities,new_isfeature, match_index, new_obs
 
     #frame 정보가 추가 전송
+    def extend_from_pcd_seq_partial(self, cam_info, rgb, mask, kf_id=-1, init=False, scale=2.0, depthmap=None, keypoints=None, boxes = None, downsample_factor = 128):
+
+        fused_point_cloud, features, scales, rots, opacities, \
+        new_isfeature, tmp_new_observation_indices, new_observation_points = (
+            self.create_pcd_from_image(cam_info, rgb, mask, init, scale=scale, depthmap=depthmap, keypoints=keypoints, boxes=boxes,
+                                       downsample_factor=downsample_factor)
+        )
+
+        # feature 관련 갱신
+        Nnew = fused_point_cloud.size()[0]
+        Ncol1 = max(0, self.observation_indices.shape[1] - 1)
+        Ncol2 = max(0, self.observation_points.shape[1] - 2)
+        new_prev_obs_indices = torch.full((Nnew, Ncol1), -1, dtype=torch.int32, device='cuda')
+        tmp_new_observation_indices = tmp_new_observation_indices.type(torch.int32)
+        new_prev_obs_points = torch.full((Nnew, Ncol2), -1.0, device='cuda')
+
+        new_observation_indices = torch.cat([new_prev_obs_indices, tmp_new_observation_indices.unsqueeze(1)], dim=1)
+        new_observation_points = torch.cat([new_prev_obs_points, new_observation_points], dim=1)
+        # feature 관련 갱신
+
+        # global gaussian id
+        old_gaussian = self.global_gaussian_counter
+        self.global_gaussian_counter += Nnew
+        new_global_ids = torch.arange(old_gaussian, self.global_gaussian_counter).cuda()
+        # global gaussian id
+
+        self.extend_from_pcd(
+            fused_point_cloud, features, scales, rots, opacities, kf_id, isfeatures=new_isfeature,
+            observation_indices=new_observation_indices,
+            observation_points=new_observation_points,
+            global_ids=new_global_ids
+        )
+
     def extend_from_pcd_seq(
-        self, cam_info, kf_id=-1, init=False, scale=2.0, depthmap=None, frame=None
+        self, cam_info, kf_id=-1, init=False, scale=2.0, depthmap=None, frame=None, downsample_factor = 128
     ):
 
+        #포인트 처리
         if frame is not None:
             keypoints = frame.keypoints
         else:
             keypoints =None
+        #가우시안 처리
         if len(frame.objects) == 0:
             boxes = None
         else:
             arr = np.array(list(frame.objects.values()))
             boxes = torch.from_numpy(arr).to('cuda')
 
-        fused_point_cloud, features, scales, rots, opacities, new_isfeature, tmp_new_observation_indices, new_observation_points = (
-            self.create_pcd_from_image(cam_info, init, scale=scale, depthmap=depthmap, keypoints=keypoints, boxes = boxes)
-        )
+        image_ab = (torch.exp(cam_info.exposure_a)) * cam_info.original_image + cam_info.exposure_b
+        image_ab = torch.clamp(image_ab, 0.0, 1.0)
+        rgb_raw = (image_ab * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy()
+        rgb = o3d.geometry.Image(rgb_raw.astype(np.uint8))
 
-        # global gaussian id
-        Nnew = fused_point_cloud.size()[0]
-        Ncol1 = max(0, self.observation_indices.shape[1] - 1)
-        Ncol2 = max(0, self.observation_points.shape[1] - 2)
-        new_prev_obs_indices = torch.full((Nnew, Ncol1), -1, dtype = torch.int32, device = 'cuda')
-        tmp_new_observation_indices = tmp_new_observation_indices.type(torch.int32)
-        new_prev_obs_points = torch.full((Nnew, Ncol2), -1.0, device = 'cuda')
-        #print(new_prev_obs_points.shape, new_prev_obs_indices.shape, new_observation_indices.shape, new_observation_points.shape)
+        #완전 특징점
+        #특징점 주변
+        #박스
+        #가우시안 없는 곳
+        #에러 있는 곳
 
-        if new_prev_obs_indices.shape[0] != tmp_new_observation_indices.shape[0]:
-            print('err new gaussians bbbb', Nnew, tmp_new_observation_indices.shape)
+        ##가우시안 위치 마스크
+        if self.get_xyz.shape[0] > 0 :
+            projections, depths, valid_proj = project_pc_to_pixel(self.get_xyz, cam_info.R, cam_info.T,
+                                                              cam_info.fx, cam_info.fy, cam_info.cx, cam_info.cy,
+                                                              cam_info.image_width, cam_info.image_height)
+            gaussian_mask = calculate_keypoint_mask(projections[valid_proj], cam_info.image_width, cam_info.image_height)
+            gaussian_mask = ~gaussian_mask
+        else:
+            gaussian_mask = torch.ones((cam_info.image_height, cam_info.image_width), device='cuda', dtype=torch.bool)
+        ##가우시안 위치 마스크
 
-        new_observation_indices = torch.cat([new_prev_obs_indices, tmp_new_observation_indices.unsqueeze(1)], dim=1)
-        new_observation_points = torch.cat([new_prev_obs_points, new_observation_points], dim=1)
+        feature_mask = torch.zeros((cam_info.image_height, cam_info.image_width), device='cuda', dtype=torch.bool)
+        if keypoints is not None:
+            feature_mask = calculate_keypoint_mask(keypoints, cam_info.image_width, cam_info.image_height)
+            feature_region_mask = calculate_feature_mask(keypoints, cam_info.image_width, cam_info.image_height, max_radius=7)
+            #feature_mask = feature_mask.cpu()
 
-        #print(new_observation_indices.shape, new_observation_points.shape)
-        old_gaussian = self.global_gaussian_counter
-        self.global_gaussian_counter += Nnew
-        new_global_ids = torch.arange(old_gaussian, self.global_gaussian_counter).cuda()
-        Nold = self.get_xyz.shape[0]
+        box_mask = torch.zeros((cam_info.image_height, cam_info.image_width), device='cuda', dtype=torch.bool)
+        if boxes is not None:
+            box_mask = calculate_bbox_mask(boxes, cam_info.image_width, cam_info.image_height)
+            #box_mask = box_mask.cpu()
+
+
+        base_mask = torch.logical_and(gaussian_mask, torch.logical_and(feature_mask == 0, box_mask == 0)).squeeze(0).cpu().numpy()
         """
-        new_isfeature = torch.zeros(Nnew,device="cuda").bool()
-        new_observations = np.full(Nnew, None, dtype=object)
-
-        if frame is not None:
-            for gauss_idx, point in enumerate(fused_point_cloud):
-                kp_idx = match_index[gauss_idx]
-                if kp_idx > -1:
-                    frame.gaussianpoints[kp_idx] = gauss_idx + Nold
-                    new_isfeature[gauss_idx] = True
-                    new_observations[gauss_idx] = {frame.id:kp_idx.item()}
-                    #new_observations[gauss_idx][frame.id] = kp_idx.numpy()
+        tmp_mask = base_mask.astype(np.uint8) * 255
+        cv2.imshow("base-mask", tmp_mask)
+        cv2.waitKey(10)
         """
 
-        self.extend_from_pcd(
-            fused_point_cloud, features, scales, rots, opacities, kf_id, isfeatures=new_isfeature,
-            observation_indices = new_observation_indices,
-            observation_points = new_observation_points,
-            global_ids=new_global_ids
-        )
+        ##마스크화해서 넘기기
+        self.extend_from_pcd_seq_partial(cam_info, rgb, base_mask, kf_id, init=init, scale=scale, depthmap=depthmap, keypoints=None, boxes=None, downsample_factor=downsample_factor)
 
+        if keypoints is not None:
+            feature_mask = torch.logical_and(gaussian_mask, feature_region_mask)
+            feature_mask = feature_mask.squeeze(0).cpu().numpy()
 
+            """"""
+            tmp_mask = feature_mask.astype(np.uint8) * 255
+            cv2.imshow("asdf-mask", tmp_mask)
+            cv2.waitKey(10)
 
+            self.extend_from_pcd_seq_partial(cam_info, rgb, feature_mask, kf_id, init=init, scale=scale, depthmap=depthmap,
+                                             keypoints=None, boxes=None, downsample_factor=downsample_factor)
+        if boxes is not None and False:
+            box_mask = torch.logical_and(gaussian_mask, box_mask)
+            box_mask = box_mask.squeeze(0).cpu().numpy()
+            self.extend_from_pcd_seq_partial(cam_info, rgb, box_mask, kf_id, init=init, scale=scale, depthmap=depthmap,
+                                             keypoints=None, boxes=boxes, downsample_factor=downsample_factor)
 
     def extend_from_pcd(
         self, fused_point_cloud, features, scales, rots, opacities, kf_id, isfeatures = None, observation_indices = None, observation_points = None, global_ids = None
@@ -604,7 +607,6 @@ class GaussianOrbModel(GaussianModel):
 
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
-
         self.densify_and_clone(grads, max_grad, extent)
 
         split_ids =self.densify_and_split(grads, max_grad, extent)

@@ -50,7 +50,7 @@ class EdgeGSSLAM(SLAM_WIN):
 
         model_params.sh_degree = 3 if self.use_spherical_harmonics else 0
 
-        self.gaussians = GaussianOrbModel(model_params.sh_degree, config=self.config)
+        self.gaussians = GaussianOrbModel(model_params.sh_degree, config=self.config, opt_params=opt_params)
         #self.gaussian s = create_gaussian_orb_model(GaussianModel(model_params.sh_degree, config=self.config), self.config)
 
         self.gaussians.init_lr(6.0)

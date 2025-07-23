@@ -14,6 +14,33 @@ def get_reprojection_loss(gaussians, keypoints, weight = 0.05):
     #print(l1, l1.mean())
     return l1#l1.mean()*weight
 
+def get_loss_gaussian(config, image, viewpoint, projection):
+    gt_image = viewpoint.original_image.cuda()
+    n = projection.shape[0]
+
+    # 1) 전체 에러 텐서 초기화 (크기 n, RGB 차이 대신 스칼라 에러로 가정)
+    error = torch.full((n,1), 1000.0, device=projection.device, dtype=torch.float)
+
+    # 2) 좌표 정수화 및 유효 포인트 마스크
+    kps = torch.round(projection).int()
+    valid = (kps[:, 0] >= 0) & (kps[:, 0] < viewpoint.image_width) & (kps[:, 1] >= 0) & (kps[:, 1] < viewpoint.image_height)
+
+    # 3) 유효 포인트 좌표 추출
+    kps_valid = kps[valid]
+    x, y = kps_valid[:, 0], kps_valid[:, 1]
+
+    # 4) 두 이미지에서 픽셀 RGB 추출
+    rgb1 = image[:,y, x].permute(1, 0).float()
+    rgb2 = gt_image[:,y, x].permute(1, 0).float()
+
+    # 5) 유효 포인트 RGB 차이 계산 (예: L2 norm)
+    rgb_diff = rgb1 - rgb2
+    diff_norm = torch.norm(rgb_diff, dim=1, keepdim=True)  # shape (m,), m = 유효 포인트 개수
+    print(rgb1.shape,rgb_diff.shape, diff_norm.shape, error.shape)
+    # 6) 전체 에러  텐서에서 유효한 인덱스 위치에만 값 반영
+    error[valid] = diff_norm
+    return error
+
 def get_loss_tracking(config, image, depth, opacity, viewpoint, initialization=False, feature_mask = None):
     image_ab = (torch.exp(viewpoint.exposure_a)) * image + viewpoint.exposure_b
     if config["Training"]["monocular"]:

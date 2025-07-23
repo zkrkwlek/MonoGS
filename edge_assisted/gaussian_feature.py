@@ -104,6 +104,43 @@ def find_correspondence(points1, points2):
 
     return gauss_matching_indices, unmatched_keypoints_mask
 
+"""
+def calculate_keypoint_mask_with_radius(keypoints, w, h, min_radius=3, max_radius=10):
+    
+    #keypoints: (N, 2) tensor, 각 행은 (y, x) 좌표
+    #w, h: 마스크의 너비와 높이
+    #min_radius, max_radius: 반지름의 최소/최대 (포함)
+    #반환: (1, h, w) boolean mask, keypoint 주변 원형 반지름 영역에 True (min_radius < 거리 < max_radius)
+    
+    device = keypoints.device
+    mask = torch.zeros((h, w), dtype=torch.bool, device=device)
+    kps = torch.round(keypoints).int()
+
+    # keypoints가 이미지 범위 내에 있는 것만 남김
+    valid = (kps[:, 0] >= 0) & (kps[:, 0] < w) & (kps[:, 1] >= 0) & (kps[:, 1] < h)
+    kps = kps[valid]
+
+    if len(kps) == 0:
+        return mask.unsqueeze(0)
+
+    # (h, w)의 평면 좌표 그리드 생성
+    y_grid = torch.arange(h, device=device).view(h, 1).expand(h, w)
+    x_grid = torch.arange(w, device=device).view(1, w).expand(h, w)
+
+    # 각 keypoint에 대해 모든 픽셀과의 거리 계산, shape: (h, w, N)
+    dist = torch.sqrt(
+        (x_grid.unsqueeze(2) - kps[:, 0]) ** 2 +
+        (y_grid.unsqueeze(2) - kps[:, 1]) ** 2
+    )
+
+    # 거리 조건에 맞는 픽셀 추출
+    ring_mask = (dist > min_radius) & (dist < max_radius)  # shape: (h, w, N)
+
+    # keypoint별로 True인 부분 하나라도 있으면 마스킹 (any)
+    combined_mask = ring_mask.any(dim=2)  # shape: (h, w)
+
+    return combined_mask.unsqueeze(0)  # (1, h, w)
+"""
 def calculate_keypoint_mask(keypoints, w, h):
     """
     keypoints: (N, 2) tensor, 각 행은 (y, x) 좌표
@@ -111,13 +148,15 @@ def calculate_keypoint_mask(keypoints, w, h):
     반환: (1, h, w) boolean mask, keypoints 위치만 True
     """
     mask = torch.zeros((h, w), dtype=torch.bool, device=keypoints.device)
+    kps = torch.round(keypoints).int()
     # keypoints가 이미지 범위 내에 있는 것만 선택 (안전)
-    valid = (keypoints[:, 0] >= 0) & (keypoints[:, 0] < h) & (keypoints[:, 1] >= 0) & (keypoints[:, 1] < w)
-    kp_y = keypoints[valid, 0].int()
-    kp_x = keypoints[valid, 1].int()
+    valid = (kps[:, 0] >= 0) & (kps[:, 0] < w) & (kps[:, 1] >= 0) & (kps[:, 1] < h)
+
+    kp_x = kps[valid, 0]
+    kp_y = kps[valid, 1]
     mask[kp_y, kp_x] = True
     return mask.unsqueeze(0)
-
+"""
 def calculate_feature_mask_with_closest(keypoints, w, h, radius=7):
     N = keypoints.shape[0]
 
@@ -140,8 +179,8 @@ def calculate_feature_mask_with_closest(keypoints, w, h, radius=7):
     closest_idx[outside_mask] = -1
 
     return mask, closest_idx
-
-def calculate_feature_mask(keypoints,w, h,radius = 7):
+"""
+def calculate_feature_mask(keypoints,w, h, max_radius = 7, min_radius = 0):
 
     N = keypoints.shape[0]
 
@@ -150,14 +189,17 @@ def calculate_feature_mask(keypoints,w, h,radius = 7):
     xs = torch.arange(w).reshape(1, w).cuda()
 
     # (N, 1, 1): 특징점 좌표 확장
-    kp_y = keypoints[:, 0].reshape(N, 1, 1)
-    kp_x = keypoints[:, 1].reshape(N, 1, 1)
+    kp_x = keypoints[:, 0].reshape(N, 1, 1)
+    kp_y = keypoints[:, 1].reshape(N, 1, 1)
 
     # (N, h, w): 각 특징점과 모든 픽셀 간 거리 제곱
     dist2 = (ys - kp_y) ** 2 + (xs - kp_x) ** 2
 
     # 반지름 이내: True
-    patch_mask = dist2 <= radius ** 2  # (N, h, w)
+    if min_radius == 0:
+        patch_mask = dist2 < max_radius ** 2  # (N, h, w)
+    else:
+        patch_mask = (dist2 < max_radius ** 2) & (dist2 > min_radius ** 2)
 
     # 여러 특징점의 패치가 겹치면 True
     mask = patch_mask.any(dim=0, keepdim=True)  # (1, h, w) bool

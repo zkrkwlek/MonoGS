@@ -23,7 +23,7 @@ from utils.datahandle_utils import move_gaussianpacket_to_gpu, move_gaussianpack
 from utils.datahandle_utils import move_occ_visibility_to_gpu
 from utils.edgeframe_utils import init_from_dataset
 from edge_assisted.gaussian_feature import project_pc_to_pixel,convert_xyz, pixels_to_pc, find_correspondence, find_correspondence_with_dist, calculate_feature_mask
-from edge_assisted.slam_utils import get_loss_tracking, get_reprojection_loss, get_patch_loss, get_reprojection_loss2
+from edge_assisted.slam_utils import get_loss_tracking, get_reprojection_loss, get_patch_loss, get_reprojection_loss2, get_loss_gaussian
 #from edge_assisted.gaussian_feature import GaussianPointManager
 
 from typing import Dict, Tuple, Optional, List
@@ -796,8 +796,11 @@ class EdgeFrontEnd(WinFrontEnd):
 
 
             gaussians = self.gaussians.clone(valid_idx) #self.gaussians.get_xyz[valid][valid_match]
-            print('tracking matching test',torch.count_nonzero(valid_idx), self.gaussians.get_xyz.shape[0], gaussians._xyz.shape[0])
-            feature_mask=calculate_feature_mask(cur_frame.keypoints, viewpoint.image_width, viewpoint.image_height, radius=5)
+            a = time.time()
+            feature_mask=calculate_feature_mask(cur_frame.keypoints, viewpoint.image_width, viewpoint.image_height, max_radius=5)
+            b = time.time()
+            print('tracking matching test', b-a, torch.count_nonzero(valid_idx), self.gaussians.get_xyz.shape[0],
+                  gaussians._xyz.shape[0])
 
         for tracking_itr in range(self.tracking_itr_num):
             t1 = t1+time.time()
@@ -892,32 +895,56 @@ class EdgeFrontEnd(WinFrontEnd):
                                                                   viewpoint.cy,
                                                                   viewpoint.image_width, viewpoint.image_height)
 
+            ##weight = failed
+            """
+            t1 = time.time()
+            cov2d = self.gaussians.convert_cov3d_to_cov2d(viewpoint.R, viewpoint.T, viewpoint.fx, viewpoint.fy)
+            t2 = time.time()
+            ##weight
+            #weight = self.gaussians.compute_2d_gaussian_weights(projections[valid_proj], cov2d[valid_proj], self.gaussians.get_opacity[valid_proj], viewpoint.image_width, viewpoint.image_height)
+            t3 = time.time()
+            print('test = weight', t2-t1, t3-t2, projections.shape, cov2d.shape)
+            """
+            ##weight = failed
+
+            ##error test
+            err = get_loss_gaussian(self.config, image, viewpoint, projections).squeeze(1)
+            tmp_val = err < 1000
+            print('err', err[tmp_val].mean(), torch.max(err[tmp_val]), torch.min(err[tmp_val]))
+            valid_err = err > 0.8
+            ##error test
+
             points1 = projections[valid_proj].detach().cpu().numpy()
             points2 = cur_frame.keypoints.detach().cpu().numpy()
 
-            test_mask = ~valid_match & valid_proj
+            test_mask = valid_match & valid_proj
             points3 = projections[test_mask].detach().cpu().numpy()
-            points4 = projections[valid_proj & ~curr_visibility].detach().cpu().numpy()
+            points4 = projections[~test_mask & valid_err].detach().cpu().numpy()
 
+            #가우시안 : 일반
             for pt1 in points1:
                 p1 = (int(round(pt1[0])), int(round(pt1[1])))
-                cv2.circle(out, p1, 1, (0, 0, 255), -1, lineType=16)
+                cv2.circle(out, p1, 3, (0, 0, 255), 1, lineType=16)
+            #가우시안 : 특징점
             for pt1 in points3:
                 p1 = (int(round(pt1[0])), int(round(pt1[1])))
-                cv2.circle(out, p1, 2, (255, 0, 0), -1, lineType=16)
+                cv2.circle(out, p1, 2, (255, 0, 0), 1, lineType=16)
+            #피쳐
             for pt1 in points2:
                 p1 = (int(round(pt1[0])), int(round(pt1[1])))
                 cv2.circle(out, p1, 1, (0, 255, 255), -1, lineType=16)
+                cv2.circle(out, p1, 5, (0, 255, 255), 1, lineType=16)
+            #가우시안 : 에러
             for pt1 in points4:
                 p1 = (int(round(pt1[0])), int(round(pt1[1])))
                 cv2.circle(out, p1, 1, (255, 255, 0), -1, lineType=16)
-
-
-
-            cv2.imshow("asdfasdfasdf", out)
-            cv2.waitKey(10)
+            #cv2.imshow("asdfasdfasdf", out)
+            #cv2.waitKey(10)
+            cv2.imwrite('./res/test_tracking/' + str(cur_frame_idx) + '.jpg', out)
 
             ##visualize test
+
+
 
         return render_pkg
 
