@@ -36,9 +36,10 @@ def get_loss_gaussian(config, image, viewpoint, projection):
     # 5) 유효 포인트 RGB 차이 계산 (예: L2 norm)
     rgb_diff = rgb1 - rgb2
     diff_norm = torch.norm(rgb_diff, dim=1, keepdim=True)  # shape (m,), m = 유효 포인트 개수
-    print(rgb1.shape,rgb_diff.shape, diff_norm.shape, error.shape)
+    #print(rgb1.shape,rgb_diff.shape, diff_norm.shape, error.shape)
     # 6) 전체 에러  텐서에서 유효한 인덱스 위치에만 값 반영
     error[valid] = diff_norm
+    
     return error
 
 def get_loss_tracking(config, image, depth, opacity, viewpoint, initialization=False, feature_mask = None):
@@ -121,7 +122,7 @@ def get_loss_mapping_rgbd(config, image, depth, viewpoint, initialization=False,
 
     l1_rgb = torch.abs(image * rgb_pixel_mask - gt_image * rgb_pixel_mask)
     l1_depth = torch.abs(depth * depth_pixel_mask - gt_depth * depth_pixel_mask)
-    #print("loss", l1_depth.mean(), l1_rgb.mean())
+    #print("loss", l1_depth.mean(), l1_rgb.mean(), l1_rgb.shape, image.shape, rgb_pixel_mask.shape)
     return l1_rgb.mean(), l1_depth.mean()#alpha * l1_rgb.mean() + (1 - alpha) * l1_depth.mean()
 
 

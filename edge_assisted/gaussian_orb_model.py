@@ -287,15 +287,15 @@ class GaussianOrbModel(GaussianModel):
             new_obs = torch.full((N1, 2), -1.0, device="cuda")
             new_obs[temp_index] = keypoints[match_index[temp_index]]
 
-            print('new gaussian feature test', fused_point_cloud.shape, temp_points.shape, torch.count_nonzero(temp_index), match_index.shape, unmatch_mask.shape, temp_keypoints.shape)
+            print('new gaussian feature test', torch.count_nonzero(new_obs > -1), fused_point_cloud.shape, temp_points.shape, torch.count_nonzero(temp_index), match_index.shape, unmatch_mask.shape, temp_keypoints.shape)
         else:
             new_isfeature = torch.zeros(N1, device='cuda')
             new_obs = torch.full((N1, 2), -1.0, device="cuda")
             match_index = torch.full((N1,), -1.0, device="cuda")
 
-
         if new_xyz.shape[0] != fused_point_cloud.shape[0]:
             print('error new gaussian', new_xyz.shape, fused_point_cloud.shape)
+
         return fused_point_cloud, features, scales, rots, opacities,new_isfeature, match_index, new_obs
 
     #frame 정보가 추가 전송
@@ -333,9 +333,10 @@ class GaussianOrbModel(GaussianModel):
         )
 
     def extend_from_pcd_seq(
-        self, cam_info, kf_id=-1, init=False, scale=2.0, depthmap=None, frame=None, downsample_factor = 128
+        self, cam_info, kf_id=-1, init=False, scale=2.0, depthmap=None, keypoints=None, downsample_factor = 128, mask = None
     ):
 
+        """
         #포인트 처리
         if frame is not None:
             keypoints = frame.keypoints
@@ -347,12 +348,18 @@ class GaussianOrbModel(GaussianModel):
         else:
             arr = np.array(list(frame.objects.values()))
             boxes = torch.from_numpy(arr).to('cuda')
+        """
+
 
         image_ab = (torch.exp(cam_info.exposure_a)) * cam_info.original_image + cam_info.exposure_b
         image_ab = torch.clamp(image_ab, 0.0, 1.0)
         rgb_raw = (image_ab * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy()
         rgb = o3d.geometry.Image(rgb_raw.astype(np.uint8))
 
+        self.extend_from_pcd_seq_partial(cam_info, rgb, mask, kf_id, init=init, scale=scale, depthmap=depthmap,
+                                         keypoints=keypoints, boxes=None, downsample_factor=downsample_factor)
+
+        return
         #완전 특징점
         #특징점 주변
         #박스
@@ -364,25 +371,26 @@ class GaussianOrbModel(GaussianModel):
             projections, depths, valid_proj = project_pc_to_pixel(self.get_xyz, cam_info.R, cam_info.T,
                                                               cam_info.fx, cam_info.fy, cam_info.cx, cam_info.cy,
                                                               cam_info.image_width, cam_info.image_height)
-            gaussian_mask = calculate_keypoint_mask(projections[valid_proj], cam_info.image_width, cam_info.image_height)
+            gaussian_mask = calculate_keypoint_mask(projections[valid_proj], cam_info.image_width, cam_info.image_height).squeeze(0)
             gaussian_mask = ~gaussian_mask
         else:
             gaussian_mask = torch.ones((cam_info.image_height, cam_info.image_width), device='cuda', dtype=torch.bool)
         ##가우시안 위치 마스크
 
         feature_mask = torch.zeros((cam_info.image_height, cam_info.image_width), device='cuda', dtype=torch.bool)
-        if keypoints is not None:
+        if keypoints is not None and False:
             feature_mask = calculate_keypoint_mask(keypoints, cam_info.image_width, cam_info.image_height)
             feature_region_mask = calculate_feature_mask(keypoints, cam_info.image_width, cam_info.image_height, max_radius=7)
             #feature_mask = feature_mask.cpu()
 
         box_mask = torch.zeros((cam_info.image_height, cam_info.image_width), device='cuda', dtype=torch.bool)
-        if boxes is not None:
+        if boxes is not None and False:
             box_mask = calculate_bbox_mask(boxes, cam_info.image_width, cam_info.image_height)
             #box_mask = box_mask.cpu()
 
 
         base_mask = torch.logical_and(gaussian_mask, torch.logical_and(feature_mask == 0, box_mask == 0)).squeeze(0).cpu().numpy()
+        #base_mask = gaussian_mask.cpu().numpy()
         """
         tmp_mask = base_mask.astype(np.uint8) * 255
         cv2.imshow("base-mask", tmp_mask)
@@ -392,7 +400,7 @@ class GaussianOrbModel(GaussianModel):
         ##마스크화해서 넘기기
         self.extend_from_pcd_seq_partial(cam_info, rgb, base_mask, kf_id, init=init, scale=scale, depthmap=depthmap, keypoints=None, boxes=None, downsample_factor=downsample_factor)
 
-        if keypoints is not None:
+        if keypoints is not None and False:
             feature_mask = torch.logical_and(gaussian_mask, feature_region_mask)
             feature_mask = feature_mask.squeeze(0).cpu().numpy()
 
@@ -500,6 +508,8 @@ class GaussianOrbModel(GaussianModel):
             torch.max(self.get_scaling, dim=1).values
             > self.percent_dense * scene_extent,
         )
+        #selected_pts_mask = torch.logical_and(
+        #    selected_pts_mask, ~self.isfeatured)
 
         stds = self.get_scaling[selected_pts_mask].repeat(N, 1)
         means = torch.zeros((stds.size(0), 3), device="cuda")
@@ -565,6 +575,8 @@ class GaussianOrbModel(GaussianModel):
             torch.max(self.get_scaling, dim=1).values
             <= self.percent_dense * scene_extent,
         )
+        #selected_pts_mask = torch.logical_and(
+        #    selected_pts_mask,~self.isfeatured)
 
         new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
@@ -612,13 +624,19 @@ class GaussianOrbModel(GaussianModel):
         split_ids =self.densify_and_split(grads, max_grad, extent)
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
+        p_opa1 = torch.count_nonzero(prune_mask).item()
+        p_opa2 = torch.count_nonzero(prune_mask & self.isfeatured).item()
+        p_vs = 0
+        p_ws = 0
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
-
+            p_vs = torch.count_nonzero(big_points_vs & self.isfeatured).item()
+            p_ws = torch.count_nonzero(big_points_ws & self.isfeatured).item()
             prune_mask = torch.logical_or(
                 torch.logical_or(prune_mask, big_points_vs), big_points_ws
             )
+        print('prune_points', self.get_xyz.shape[0], torch.count_nonzero(prune_mask).item(), torch.count_nonzero(prune_mask & (self.isfeatured)).item(), '=', p_opa1, p_opa2, p_vs, p_ws)
         ## remove gaussian ids
         removed_ids = self.unique_gaussian_ids[prune_mask]
         removed_ids = torch.cat((split_ids, removed_ids), axis = 0)

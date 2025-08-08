@@ -125,10 +125,19 @@ class EdgeGSSLAM(SLAM_WIN):
             f = self.dataset[str(fid)]
             f.color = img
             f.depth = depth
+            f.UpdatePose(R,t)
         else:
             f = EdgeFrame(fid, img, R, t, depth=depth)
             self.dataset[fid] = f
         return f
+
+    def AddContours(self, fid, contours):
+        if fid in self.dataset:
+            f = self.dataset[str(fid)]
+        else:
+            f = EdgeFrame(fid, None, None, None)
+            self.dataset[fid] = f
+        f.contours = contours
 
     def AddObjectBBox(self, fid, oid, bbox):
 
@@ -151,7 +160,7 @@ class EdgeGSSLAM(SLAM_WIN):
         return (fid) in self.dataset
 
     def run(self):
-        backend_process = threading.Thread(target=self.backend.run)
+        backend_process = threading.Thread(target=self.backend.run_with_ba)
         if self.use_gui:
             gui_process = threading.Thread(target=slam_win_gui.run, args=(self.params_gui,))
             gui_process.start()

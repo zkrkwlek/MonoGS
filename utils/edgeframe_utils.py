@@ -20,6 +20,8 @@ class EdgeFrame:
         self.objects = {}
         self.object_ids = []
         self.object_boxes = []
+        self.contours = []
+        self.contours_mask = None
 
         ##T는 지금은 이용 안함.
         self.T = np.zeros((4, 4), dtype=np.float64)
@@ -35,6 +37,29 @@ class EdgeFrame:
         #self.gaussianpoints = None #torch, cpu로 내려야 하나? 이것만 수정함. 이걸 통신하자. # 이게 prune 후 frontend로 갈 때 prev, 아직 갱신 안된 키프레임도 처리되어야 함
         #self.gaussians = None
         #self.inliers = None #전송안하면, 초기에 넘겨받고 갱신해야 함. 이것도 torch임.
+
+    def clean(self):
+        self.color = None
+        self.depth = None
+
+        #self.keypoints = None
+        #self.descriptors = None
+
+        self.objects = None
+        self.object_ids = None
+        self.object_boxes = None
+        self.contours = None
+        self.contours_mask = None
+        self.T = None
+
+
+    def UpdatePose(self, R, t):
+        self.T = np.zeros((4, 4), dtype=np.float64)
+        self.T[:3, :3] = R
+        if t is None:
+            t = np.zeros((3, 1), dtype=np.float64)
+        self.T[:3, 3] = t.flatten()  # 또는 M[:3, 3] = b.squeeze()
+        self.T[3, 3] = 1.0
 
     def AddObject(self, oid, bbox):
         self.objects[oid] = bbox

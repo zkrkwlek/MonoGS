@@ -86,6 +86,18 @@ def pixels_to_pc(points, R, t, fx, fy, cx, cy):
 
 #points1 : gaussian
 #points2 :
+def get_correspondences_within_threshold(points1, points2, th=3.0):
+    dists = torch.cdist(points1, points2)  # (N, M)
+    min_dists, min_indices = dists.min(dim=1)  # min_indices: (N,)
+
+    # mask: 점들 중 거리 조건 충족하는 것만
+    valid_mask = min_dists <= th
+    points1_indices = torch.arange(points1.shape[0], device=points1.device)[valid_mask]
+    points2_indices = min_indices[valid_mask]
+
+    # (n_match, 2) 형태로 반환
+    matched = torch.stack((points1_indices, points2_indices), dim=1).int()
+    return matched
 
 def find_correspondence_with_dist(points1, points2, th = 3.0):
     dists = torch.cdist(points1, points2)  # (N, M)
@@ -103,6 +115,15 @@ def find_correspondence(points1, points2):
     unmatched_keypoints_mask = ~matches_kp_to_gauss
 
     return gauss_matching_indices, unmatched_keypoints_mask
+
+def match_ac_from_ab_bc(A, B):
+    mask = torch.isin(A[:, 1], B[:, 0])
+    matching_b_vals = A[mask, 1]
+    indices_in_B = (B[:, 0].unsqueeze(0) == matching_b_vals.unsqueeze(1)).nonzero(as_tuple=False)[:, 1]
+    a_idx = A[mask, 0]
+    c_idx = B[indices_in_B, 1]
+    result = torch.stack([a_idx, c_idx], dim=1)
+    return result
 
 """
 def calculate_keypoint_mask_with_radius(keypoints, w, h, min_radius=3, max_radius=10):
@@ -156,8 +177,8 @@ def calculate_keypoint_mask(keypoints, w, h):
     kp_y = kps[valid, 1]
     mask[kp_y, kp_x] = True
     return mask.unsqueeze(0)
-"""
-def calculate_feature_mask_with_closest(keypoints, w, h, radius=7):
+
+def calculate_feature_mask_with_closest(keypoints, w, h, max_radius = 7, min_radius = 0):
     N = keypoints.shape[0]
 
     ys = torch.arange(h, device=keypoints.device).reshape(h, 1)
@@ -167,7 +188,10 @@ def calculate_feature_mask_with_closest(keypoints, w, h, radius=7):
     kp_x = keypoints[:, 1].reshape(N, 1, 1)
 
     dist2 = (ys - kp_y) ** 2 + (xs - kp_x) ** 2        # (N, h, w)
-    patch_mask = dist2 <= radius ** 2                   # (N, h, w)
+    if min_radius == 0:
+        patch_mask = dist2 < max_radius ** 2  # (N, h, w)
+    else:
+        patch_mask = (dist2 < max_radius ** 2) & (dist2 > min_radius ** 2)
     mask = patch_mask.any(dim=0, keepdim=True)          # (1, h, w) bool
 
     # 각 픽셀별 모든 키포인트와의 거리 중 최솟값 인덱스
@@ -179,7 +203,7 @@ def calculate_feature_mask_with_closest(keypoints, w, h, radius=7):
     closest_idx[outside_mask] = -1
 
     return mask, closest_idx
-"""
+
 def calculate_feature_mask(keypoints,w, h, max_radius = 7, min_radius = 0):
 
     N = keypoints.shape[0]
@@ -203,6 +227,7 @@ def calculate_feature_mask(keypoints,w, h, max_radius = 7, min_radius = 0):
 
     # 여러 특징점의 패치가 겹치면 True
     mask = patch_mask.any(dim=0, keepdim=True)  # (1, h, w) bool
+    del ys, xs, dist2, patch_mask
     return mask
 
 def calculate_bbox_mask(boxes, w, h):

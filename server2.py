@@ -67,8 +67,32 @@ def predict(message):
 
     return
 
-def resdepthanything(id,src):
+def yolosegc(id, src):
+    res = sess.post(FACADE_SERVER_ADDR + "/Download?keyword=" + "yolosegc" + "&id=" + str(id) + "&src=" + src,"")
+    contour_array = np.frombuffer(res.content, dtype=np.uint16)
 
+    n_array = len(contour_array)
+    idx = 0
+    contours = []
+    while True:
+        iid = (contour_array[idx])
+        idx += 1
+        ni = (contour_array[idx])
+        idx += 1
+
+        contour = []
+        for ti in range(ni):
+            x = (contour_array[idx])
+            idx += 1
+            y = (contour_array[idx])
+            idx += 1
+            contour.append((x, y))
+        contours.append(contour)
+        if idx == n_array:
+            break
+    slam.AddContours(id, contours)
+
+def resdepthanything(id,src):
 
     #if not slam.CheckFrame(id):
         #print("resdepthanything", id)
@@ -100,7 +124,6 @@ def resdepthanything(id,src):
                 depth = depth.astype(np.float64) / 1000.0
 
                 frame = slam.AddFrame(fid, image, R, t, depth=depth)
-
                 # slam.SetDepth(id, depth)
                 slam.edge_queue.put(id)
 
@@ -161,6 +184,8 @@ def ObjectMapUpdate(id,src):
     fid = int(array[1])
     bbox = array[2:6]
     slam.AddObjectBBox(fid, oid, bbox)
+
+
     """
     if not slam.CheckFrame(fid):
         #Frame 추가
@@ -241,7 +266,7 @@ if __name__ == '__main__':
     ##','으로 연결하여 다중 키워드 등록
     ##ex)'image,segmentation'
     parser.add_argument(
-        '--RKeywords', type=str,default='ObjectMapCreation,ObjectMapUpdate,resdepthanything',
+        '--RKeywords', type=str,default='ObjectMapCreation,ObjectMapUpdate,resdepthanything,yolosegc',
         help='Received keyword lists')
     ##서버에서 생성한 데이터를 등록하는 키워드
     ##유니크 키워드 생성 필요
