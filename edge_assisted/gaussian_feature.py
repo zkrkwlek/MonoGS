@@ -209,8 +209,8 @@ def calculate_feature_mask(keypoints,w, h, max_radius = 7, min_radius = 0):
     N = keypoints.shape[0]
 
     # (h, 1), (1, w): 픽셀 좌표 그리드
-    ys = torch.arange(h).reshape(h, 1).cuda()
-    xs = torch.arange(w).reshape(1, w).cuda()
+    ys = torch.arange(h, dtype=torch.float32).reshape(h, 1).cuda()
+    xs = torch.arange(w, dtype=torch.float32).reshape(1, w).cuda()
 
     # (N, 1, 1): 특징점 좌표 확장
     kp_x = keypoints[:, 0].reshape(N, 1, 1)

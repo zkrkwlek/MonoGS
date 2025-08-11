@@ -9,11 +9,12 @@ from edge_assisted.gaussian_feature import project_pc_to_pixel
 from utils.pose_utils import SE3_exp
 
 class EdgeFrame:
-    def __init__(self,id,color,R,t,depth=None):
+    def __init__(self,id,color,R,t,depth=None, src = None):
         self.id = id
         self.kf_id = -1
         self.color = color #수정 안함.
         self.depth = depth #수정 안함
+        self.src = src
 
         ##오브젝트 영역
         ##데이터 수정 가능

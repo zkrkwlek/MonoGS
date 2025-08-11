@@ -67,6 +67,24 @@ def predict(message):
 
     return
 
+def DeviceConnect(id, src):
+
+    res = sess.post(FACADE_SERVER_ADDR + "/Download?keyword=" + "DeviceConnect" + "&id=" + str(id) + "&src=" + src, "")
+    cam_data = np.frombuffer(res.content, dtype=np.float32)
+
+    w = int(cam_data[0])
+    h = int(cam_data[1])
+    fx = cam_data[2]
+    fy = cam_data[3]
+    cx = cam_data[4]
+    cy = cam_data[5]
+    K = np.array([[fx, 0, cx],
+                  [0, fy, cy],
+                  [0, 0, 1]], dtype=np.float32)
+    D = cam_data[6:11]
+    slam.AddDevice(src, K, D, w, h)
+    #print('device', src, id, cam_data)
+
 def yolosegc(id, src):
     res = sess.post(FACADE_SERVER_ADDR + "/Download?keyword=" + "yolosegc" + "&id=" + str(id) + "&src=" + src,"")
     contour_array = np.frombuffer(res.content, dtype=np.uint16)
@@ -90,7 +108,7 @@ def yolosegc(id, src):
         contours.append(contour)
         if idx == n_array:
             break
-    slam.AddContours(id, contours)
+    slam.AddContours(id, contours,src=src.split('.')[0])
 
 def resdepthanything(id,src):
 
@@ -123,7 +141,7 @@ def resdepthanything(id,src):
                 depth = cv2.imdecode(depth_array, cv2.IMREAD_UNCHANGED)
                 depth = depth.astype(np.float64) / 1000.0
 
-                frame = slam.AddFrame(fid, image, R, t, depth=depth)
+                frame = slam.AddFrame(fid, image, R, t, depth=depth, src=src)
                 # slam.SetDepth(id, depth)
                 slam.edge_queue.put(id)
 
@@ -164,7 +182,7 @@ def ObjectMapCreation(id,src):
     t = array[:3]
     R = np.array(array[3:12]).reshape(3, 3)
     oid = id
-    print("Add Object", oid)
+    print("Add Object", oid, src)
     #slam.AddObject(oid,R,t)
 
     #slam.backend.ObjectMapInitialization()
@@ -183,7 +201,8 @@ def ObjectMapUpdate(id,src):
     oid = int(array[0])
     fid = int(array[1])
     bbox = array[2:6]
-    slam.AddObjectBBox(fid, oid, bbox)
+
+    slam.AddObjectBBox(fid, oid, bbox,src=src.split('.')[0])
 
 
     """
@@ -266,7 +285,7 @@ if __name__ == '__main__':
     ##','으로 연결하여 다중 키워드 등록
     ##ex)'image,segmentation'
     parser.add_argument(
-        '--RKeywords', type=str,default='ObjectMapCreation,ObjectMapUpdate,resdepthanything,yolosegc',
+        '--RKeywords', type=str,default='ObjectMapCreation,ObjectMapUpdate,resdepthanything,yolosegc,DeviceConnect',
         help='Received keyword lists')
     ##서버에서 생성한 데이터를 등록하는 키워드
     ##유니크 키워드 생성 필요

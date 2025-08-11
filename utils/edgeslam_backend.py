@@ -65,6 +65,8 @@ class EdgeBackEnd(WinBackEnd):
 
         #object
         self.objects = None
+        self.devices = None
+
 
     def push_to_frontend(self, tag=None, first_id = None, prune = None, local_window = None):
 
@@ -109,7 +111,7 @@ class EdgeBackEnd(WinBackEnd):
     def preprocessing_add_kf(self):
         self.gaussians.observation_indices = torch.cat([self.gaussians.observation_indices,
                                                         torch.full((self.gaussians.observation_indices.shape[0], 1),
-                                                                   -1, device='cuda')], dim=1)
+                                                                   -1, device='cuda', dtype=torch.int32)], dim=1)
         self.gaussians.observation_points = torch.cat([self.gaussians.observation_points,
                                                        torch.full((self.gaussians.observation_points.shape[0], 2), -1.0,
                                                                   device='cuda')], dim=1)
@@ -176,14 +178,18 @@ class EdgeBackEnd(WinBackEnd):
         obs_idx_col = gaussian_observation_indices[:, ref_id]  # shape: (N,)
         match_values = matches # shape: (K,)
         eq = obs_idx_col.unsqueeze(1) == match_values.unsqueeze(0)  # (N, K)
+
+        print('a', obs_idx_col.dtype, obs_idx_col.shape)
+
         key_positions = torch.where(eq.any(dim=1), eq.float().argmax(dim=1),
-                                    torch.full_like(obs_idx_col, -1))
+                                    torch.full_like(obs_idx_col, -1, dtype = obs_idx_col.dtype))[0].int()
         included_mask = key_positions != -1
 
-        frame_gaussian_index = torch.where(included_mask)[0]  # 가우시안의 인덱스
+        frame_gaussian_index = torch.where(included_mask)[0].int()  # 가우시안의 인덱스
         if n_start > 0:
             frame_gaussian_index += n_start
         frame_match_index = key_positions[included_mask]  # 매치애서 인덱스
+        print('b',frame_match_index.dtype, frame_gaussian_index.dtype, key_positions.dtype)
         return frame_gaussian_index, frame_match_index
 
     def update_observation(self, frame_gaussian_index, frame_match_index, matches, frame, target_id):
@@ -200,7 +206,7 @@ class EdgeBackEnd(WinBackEnd):
         # 키포지션은 그게 매치 안에서 어디있는지를 알 수 있음.
         eq = obs_idx_col.unsqueeze(1) == match_values.unsqueeze(0)  # (N, K)
         key_positions = torch.where(eq.any(dim=1), eq.float().argmax(dim=1),
-                                    torch.full_like(obs_idx_col, -1))
+                                    torch.full_like(obs_idx_col, -1, dtype = obs_idx_col.dtype))
         included_mask = key_positions != -1
 
         frame_gaussian_index = torch.where(included_mask)[0]
@@ -1204,7 +1210,7 @@ class EdgeBackEnd(WinBackEnd):
         selected = sampled + must_include
         return selected
     """
-    def map_with_ba(self, current_window, prune=False, iters=1, matches=None, graph=None):
+    def map_with_ba(self, current_window, prune=False, iters=1, matches=None, extension_graph=None):
         feature_radius = 9
         if len(current_window) == 0:
             return None
@@ -1230,6 +1236,7 @@ class EdgeBackEnd(WinBackEnd):
 
         ##patch consistency
         doPatchConsistency = False
+        """
         if False and graph is not None and len(matches) > 0:
             doPatchConsistency = True
             for cam_idx in graph:
@@ -1240,7 +1247,7 @@ class EdgeBackEnd(WinBackEnd):
                 frame = self.frames[cam_idx]
                 kf_patches[cam_idx]['patch'], kf_patches[cam_idx]['valid'] = frame.extract_patches_differentiable(
                     viewpoint.original_image, frame.keypoints[match[:, 1]])
-
+        """
         ##patch consistency
 
         for _ in range(iters):
@@ -1325,8 +1332,11 @@ class EdgeBackEnd(WinBackEnd):
                 radii_acm.append(radii)
 
             ##geometric consistency
-            if graph is None:
+            if extension_graph is None:
                 loss_ba = self.bundle_adjustment(current_window, bPoseUpdate= False)
+                loss_mapping += loss_ba * self.weight_ba
+            else:
+                loss_ba = self.bundle_adjustment(extension_graph, bPoseUpdate=False)
                 loss_mapping += loss_ba * self.weight_ba
             """
             if graph is not None:
@@ -2331,6 +2341,7 @@ class EdgeBackEnd(WinBackEnd):
         ).eval().cuda()
         xfeat.lighterglue = LighterGlue(weights='../accelerated_features/weights/xfeat-lighterglue.pt').eval().cuda()
         matches_info = {}
+        extension_window = None
 
         K = torch.tensor([[self.dataset.fx, 0, self.dataset.cx],
                       [0, self.dataset.fy, self.dataset.cy],
@@ -2352,11 +2363,11 @@ class EdgeBackEnd(WinBackEnd):
                 s = time.time()
 
                 prune_mask = None
-                _, prune_mask1 = self.map_with_ba(self.current_window, )#matches=kf_matches, graph=current_window)  # matches = kf_matches, graph = recent_keys
+                _, prune_mask1 = self.map_with_ba(self.current_window, extension_graph=extension_window)#matches=kf_matches, graph=current_window)  # matches = kf_matches, graph = recent_keys
                 if prune_mask1 is not None:
                     prune_mask = prune_mask1
                 if self.last_sent >= 10:
-                    _, prune_mask2 = self.map_with_ba(self.current_window, prune=True, iters=10, )#matches=kf_matches, graph=current_window)  # matches=kf_matches, graph = recent_keys
+                    _, prune_mask2 = self.map_with_ba(self.current_window, prune=True, iters=10, extension_graph=extension_window)#matches=kf_matches, graph=current_window)  # matches=kf_matches, graph = recent_keys
                     if prune_mask2 is not None:
                         prune_mask = prune_mask2
 
@@ -2422,6 +2433,7 @@ class EdgeBackEnd(WinBackEnd):
                     print("init_ba", torch.count_nonzero(self.gaussians.isfeatured), torch.count_nonzero(self.gaussians.observation_points>-1), torch.count_nonzero(self.gaussians.observation_indices > -1), frame.keypoints.shape)
 
                     self.initialize_map_with_ba(cur_frame_idx, viewpoint)
+                    extension_window = [cur_frame_idx]
                     self.push_to_frontend("init", first_id=cur_frame_idx)
 
                     ##test image save
@@ -2486,172 +2498,115 @@ class EdgeBackEnd(WinBackEnd):
                     last_keys = list(self.frames)
                     N_window = len(last_keys)
                     matches_info[cur_frame_idx]={}
+
+                    index_map = {value: idx for idx, value in enumerate(last_keys)}
+                    window_indices = [index_map[x] for x in current_window] + [index_map[x] for x in last_keys[-6:-1]]
+                    tmp_extension_indices = list(range(min(window_indices), max(window_indices), 5))
+                    extension_indices = list(set(window_indices + tmp_extension_indices))
+                    extension_indices.sort(reverse = True)
+                    extension_window = [last_keys[i] for i in extension_indices]
+
+                    #tmp_extension_window.reverse()
+                    #extension_indices = [x for x in tmp_extension_window if
+                    #                     x not in window_indices]  # 현재 윈도우에 포함 안된 5의 배수 찾기
+
+                    new_kf_idx = extension_indices[0]
+                    btmp1 = new_kf_idx % 5 == 0
+
+                    #최근 5개 키프레임과 매칭 추가
                     for idx, kf_idx in enumerate(last_keys[-6:-1]):
-                        #if kf_idx == cur_frame_idx:
-                        #    continue
                         keyframe = self.frames[kf_idx]
-                        view_kf = self.viewpoints[kf_idx]
-
-                        d0 = {'keypoints':frame.keypoints,'descriptors':torch.from_numpy(frame.descriptors).cuda(),'image_size':(viewpoint.image_width, viewpoint.image_height)}
-                        d1 = {'keypoints':keyframe.keypoints,'descriptors':torch.from_numpy(keyframe.descriptors).cuda(),'image_size':(viewpoint.image_width, viewpoint.image_height)}
-                        a = time.time()
-
+                        d0 = {'keypoints': frame.keypoints,
+                              'descriptors': torch.from_numpy(frame.descriptors).cuda(),
+                              'image_size': (viewpoint.image_width, viewpoint.image_height)}
+                        d1 = {'keypoints': keyframe.keypoints,
+                              'descriptors': torch.from_numpy(keyframe.descriptors).cuda(),
+                              'image_size': (viewpoint.image_width, viewpoint.image_height)}
                         matches = xfeat.match_lighterglue(d0, d1)
-
-                        b = time.time()
-                        F12 = compute_F12(viewpoint.R, viewpoint.T, view_kf.R, view_kf.T, K, K)
-                        res = self.check_dist_epipolar_line(frame.keypoints[matches[:,0]], keyframe.keypoints[matches[:,1]], F12)
-                        matches = matches[res]
-                        #print('epi test = ',idx, kf_idx, torch.count_nonzero(res).item(), matches.shape, frame.keypoints.dtype)
                         matches_info[cur_frame_idx][kf_idx] = matches.int()
                         matches_info[kf_idx][cur_frame_idx] = matches[:, [1, 0]].int()
 
-                        #대응쌍 찾기
-                        gidx, fidx = self.get_gaussian_match_indices(self.gaussians.observation_indices, matches[:,1], keyframe.kf_id)
-                        selected_values = matches[fidx, 0]
-                        kp_gaussian_mask[selected_values] = True
-                        c = time.time()
-                        #업데이트 옵저베이션
-                        self.update_observation(gidx, fidx, matches[:,0], frame, frame.kf_id)
-                        d = time.time()
-                        #image0 = numpy_image_to_torch(frame.color).cuda()
-                        #image1 = numpy_image_to_torch(keyframe.color).cuda()
-
-                        ##xfeat + lighetrglue
-
-                        ##alike_lightglue
-                        """
-                        with torch.inference_mode():
-                            
-                            a = time.time()
-                            feats0 = extractor.extract(viewpoint.original_image)
-                            feats1 = extractor.extract(self.viewpoints[kf_idx].original_image)
-                            b = time.time()
-                            matches01 = light_glue_matcher({"image0": feats0, "image1": feats1})
-                            c = time.time()
-                        feats0, feats1, matches01 = [
-                            rbd(x) for x in [feats0, feats1, matches01]
-                        ]  # remove batch dimension
-
-                        kpts0, kpts1, matches = feats0["keypoints"], feats1["keypoints"], matches01["matches"]
-                        #m_kpts0, m_kpts1 = kpts0[matches[..., 0]], kpts1[matches[..., 1]]
-                        """
-                        unique_values, inverse_indices, counts = torch.unique(fidx, return_inverse=True,
-                                                                              return_counts=True)
-                        # 중복된 값 필터링 (counts > 1 인 값)
-                        duplicates = unique_values[counts > 1]
-                        #print('backend = keyframe', kf_idx, "=", torch.count_nonzero(self.gaussians.observation_indices[:,keyframe.kf_id] > -1),"=", matches.shape, gidx.shape)
-                        #print('backend = update frame', cur_frame_idx, torch.count_nonzero(self.gaussians.observation_indices[:,frame.kf_id] > -1),"=", torch.count_nonzero(~kp_gaussian_mask))
-                        #print('light_glue', cur_frame_idx, kf_idx, '=', duplicates.shape,'=', b - a, c - b, d-c)
-
-                        """
-                        if N_window > 5 and (idx-5) >= 0:
-                            idx2 = idx-5
-                            kf_idx2 = last_keys[idx2]
-                            if kf_idx2 in matches_info[kf_idx]:
-                                match2 = matches_info[kf_idx][kf_idx2]
-                                match_ac = match_ac_from_ab_bc(matches, match2)
-                                print(match_ac.dtype, match_ac.shape)
-                                
-                                image_np1 = (
-                                    viewpoint.original_image
-                                        .permute(1, 2, 0)  # (C, H, W) → (H, W, C)
-                                        .cpu()  # GPU → CPU
-                                        .numpy()  # NumPy 배열로 변환
-                                )
-                                image_np1 = (image_np1 * 255.0).astype(np.uint8)
-                                image_np1 = cv2.cvtColor(image_np1, cv2.COLOR_RGB2BGR)
-
-                                image_np2 = (
-                                    self.viewpoints[kf_idx2].original_image
-                                        .permute(1, 2, 0)  # (C, H, W) → (H, W, C)
-                                        .cpu()  # GPU → CPU
-                                        .numpy()  # NumPy 배열로 변환
-                                )
-                                image_np2 = (image_np2 * 255.0).astype(np.uint8)
-                                image_np2 = cv2.cvtColor(image_np2, cv2.COLOR_RGB2BGR)
-
-                                out = self.FeatureManager.tracker.visualize(image_np1, image_np2, match_ac.cpu().numpy(), frame.keypoints.cpu().numpy(),self.frames[kf_idx2].keypoints.cpu().numpy(), mode=True)
-                                cv2.imwrite('./res/test_ba/light_glue_' + str(cur_frame_idx) + '_' + str(kf_idx2) + '.jpg',
-                                            out)
-                        """
-                        #self.connect_observation()
-
-
-                    ##graph update
-                    index_map = {value: idx for idx, value in enumerate(last_keys)}
-                    window_indices = [index_map[x] for x in current_window]
-                    tmp_extension_window = list(range(min(window_indices), max(window_indices), 5))
-                    tmp_extension_window.reverse()
-                    extension_indices = [x for x in tmp_extension_window if x not in window_indices] #현재 윈도우에 포함 안된 5의 배수 찾기
-                    print(min(window_indices), max(window_indices), N_window, "=", last_keys, current_window, extension_indices)
-
-                    if N_window % 5 == 1:
-                        pass
-                    else:
-                        #curr과 5의 배수들을 연결
-                        #최신 5안에 있으면 패스
-                        pass
-
-                    if N_window % 5 == 1:
-
-                        for i in range(N_window-11, -1, -5):
+                    ##N의 배수 키프레임 사이의 연관(현재 프레임이 N의 배수인 경우)
+                    if btmp1:
+                        for i in tmp_extension_indices[-2::-1]:
                             idx1 = i
-                            idx2 = i+5
+                            idx2 = i+1
                             kf_idx1 = last_keys[idx1]
                             kf_idx2 = last_keys[idx2]
-                            print('graph test', idx1, idx2, N_window, '=', kf_idx1, kf_idx2, cur_frame_idx)
 
                             if cur_frame_idx in matches_info[kf_idx2]:
 
                                 match1 = matches_info[kf_idx1][kf_idx2]
                                 match2 = matches_info[kf_idx2][cur_frame_idx]
-
+                                #epipolar constarints
                                 match_ac = match_ac_from_ab_bc(match1, match2)
 
                                 if match_ac.shape[0] > 10:
                                     matches_info[kf_idx1][cur_frame_idx] = match_ac
                                     matches_info[cur_frame_idx][kf_idx1] = match_ac[:, [1, 0]]
 
-                                    gidx, fidx = self.get_gaussian_match_indices(self.gaussians.observation_indices, match_ac[:, 0], self.frames[kf_idx1].kf_id)
-                                    selected_values = match_ac[fidx, 1]
-                                    kp_gaussian_mask[selected_values] = True
-                                    self.update_observation(gidx, fidx, matches[:, 1], frame, frame.kf_id)
+                    ##윈도우 내의 키프레임과 현재 프레임 연결
+                    #소스가 배수이거나 배수가 아님
+                    #타겟이 배수이거나 배수가 아님
+                    #idx1 -> idx2로 가는게 목표임.
+                    #idx1 -> tmp_idx1 -> idx2
+                    #idx1 -> tmp_idx2 -> idx2
+                    #idx1 -> tmp_idx1 -> tmp_idx2 -> idx2
+                    #tmp_idx1 = tmp_idx2
 
-                                    image_np1 = (
-                                        self.viewpoints[kf_idx1].original_image
-                                            .permute(1, 2, 0)  # (C, H, W) → (H, W, C)
-                                            .cpu()  # GPU → CPU
-                                            .numpy()  # NumPy 배열로 변환
-                                    )
-                                    image_np1 = (image_np1 * 255.0).astype(np.uint8)
-                                    image_np1 = cv2.cvtColor(image_np1, cv2.COLOR_RGB2BGR)
+                    for idx in extension_indices[:0:-1]:
+                        kf_idx1 = last_keys[idx]
 
-                                    image_np2 = (
-                                        self.viewpoints[cur_frame_idx].original_image
-                                            .permute(1, 2, 0)  # (C, H, W) → (H, W, C)
-                                            .cpu()  # GPU → CPU
-                                            .numpy()  # NumPy 배열로 변환
-                                    )
-                                    image_np2 = (image_np2 * 255.0).astype(np.uint8)
-                                    image_np2 = cv2.cvtColor(image_np2, cv2.COLOR_RGB2BGR)
+                        diff = new_kf_idx - idx
+                        print('test ', idx, new_kf_idx, diff)
+                        if diff < 6:
+                            kf_idx2 = cur_frame_idx
+                        elif idx % 5 == 0:
+                            kf_idx2 = last_keys[idx + 5]
+                            print('test % 5 = ', idx, idx+5, '=', kf_idx1, kf_idx2)
+                        else:
+                            kf_idx2 = last_keys[((idx // 5) + 1) * 5]
+                            print('test not % 5 = ', idx, ((idx // 5) + 1) * 5, '=', kf_idx1, kf_idx2)
 
-                                    out = self.FeatureManager.tracker.visualize(image_np1, image_np2,
-                                                                                match_ac.cpu().numpy(),
-                                                                                self.frames[
-                                                                                    kf_idx1].keypoints.cpu().numpy(),
-                                                                                self.frames[
-                                                                                    cur_frame_idx].keypoints.cpu().numpy(),
-                                                                                mode=True)
-                                    cv2.imwrite(
-                                        './res/test_ba/light_glue_' + str(cur_frame_idx) + '_' + str(kf_idx1) + '.jpg',
-                                        out)
+                        keyframe1 = self.frames[kf_idx1]
+                        keyframe2 = self.frames[kf_idx2]
 
-                                else:
-                                    break
+                        matches = matches_info[kf_idx1][kf_idx2]
+                        #print('match', keyframe1.kf_id, max(matches[:,0]),max(self.gaussians.observation_indices[:,keyframe1.kf_id]))
+                        gidx, fidx = self.get_gaussian_match_indices(self.gaussians.observation_indices, matches[:, 0],
+                                                                     keyframe1.kf_id)
+                        self.update_observation(gidx, fidx, matches[:, 1], keyframe2, keyframe2.kf_id)
+
+                        if kf_idx2 == cur_frame_idx:
+                            selected_values = matches[fidx, 0]
+                            kp_gaussian_mask[selected_values] = True
+
+                    """
+                    #delete
+                    for idx in extension_window[1:]:
+                        kf_idx = last_keys[idx]
+                        keyframe = self.frames[kf_idx]
+                        view_kf = self.viewpoints[kf_idx]
+
+                        diff = new_kf_idx-idx
+                        if diff < 6:
+                            d0 = {'keypoints': frame.keypoints,
+                                  'descriptors': torch.from_numpy(frame.descriptors).cuda(),
+                                  'image_size': (viewpoint.image_width, viewpoint.image_height)}
+                            d1 = {'keypoints': keyframe.keypoints,
+                                  'descriptors': torch.from_numpy(keyframe.descriptors).cuda(),
+                                  'image_size': (viewpoint.image_width, viewpoint.image_height)}
+                            matches = xfeat.match_lighterglue(d0, d1)
+                        else:
+                            btmp2 = idx % 5 == 0
+                            if btmp2:
+                                source_idx = idx
+                            else:
+                                source_idx = ((idx // 5) + 1) * 5
 
 
-
+                        print('test', idx, kf_idx)
+                    """
 
                     Nold = self.gaussians._xyz.size()[0]
 
@@ -2670,32 +2625,7 @@ class EdgeBackEnd(WinBackEnd):
                         tmp_gaussian_mask = ~tmp_gaussian_mask
                         gaussian_mask = torch.logical_and(~kp_region_mask, tmp_gaussian_mask)
                         a1 = time.time()
-                        print('1',aa1-a, aa2-aa1, aa3-aa2, aa3-a1, projection.device, tmp_gaussian_mask.device, gaussian_mask.device)
-
-                        #3) update keypoint mask
-
-
-                        a2 = time.time()
-                        #feature_projections = projection[valid_projection & self.gaussians.isfeatured]
-                        #matches_gaussian = get_correspondences_within_threshold(feature_projections, frame.keypoints).long()
-                        #a22 = time.time()
-                        #print('2', a22 - a2, a2-a1, feature_projections.shape, matches_gaussian.shape)
-
-                        #feature mask
-                        #gaussian_indices = torch.where(valid_projection & self.gaussians.isfeatured)[0]
-                        #frame_gaussian_index = gaussian_indices[matches_gaussian[:,0]]
-                        #mask = torch.zeros(self.gaussians.get_xyz.shape[0], dtype=torch.bool, device='cuda')
-                        a3 = time.time()
-                        #print('3', a3 - a22, frame_gaussian_index.device, gaussian_indices.device)
-                        #4) index and point update
-
-                        #self.gaussians.observation_indices[frame_gaussian_index, frame.kf_id] = matches_gaussian[:,1]
-                        #self.gaussians.observation_points[frame_gaussian_index, frame.kf_id * 2:frame.kf_id * 2 + 2] = \
-                        #    frame.keypoints[matches_gaussian[:,1]]
-
-                        #5) keypoint mask
-                        #match_mask = torch.zeros(frame.keypoints.shape[0], dtype=torch.bool, device='cuda')
-                        #match_mask[matches_gaussian[:,1]] = True
+                        #print('1',aa1-a, aa2-aa1, aa3-aa2, aa3-a1, projection.device, tmp_gaussian_mask.device, gaussian_mask.device)
                         unmatched_mask = ~kp_gaussian_mask
                         kp_mask = calculate_keypoint_mask(frame.keypoints[unmatched_mask], viewpoint.image_width, viewpoint.image_height,)
                         kp_mask = torch.logical_and(kp_mask, tmp_gaussian_mask)
@@ -2705,20 +2635,43 @@ class EdgeBackEnd(WinBackEnd):
                         self.add_next_kf(cur_frame_idx, viewpoint, depth_map=depth_map, mask = kp_mask.squeeze(0).cpu().numpy(), keypoints=frame.keypoints, downsample_factor=1.0)
                         d = time.time()
 
+                        """
                         tmp_mask1 = gaussian_mask.squeeze(0).cpu().numpy().astype(np.uint8) * 255
                         cv2.imshow("mask1", tmp_mask1)
                         tmp_mask2 = kp_mask.squeeze(0).cpu().numpy().astype(np.uint8) * 255
                         cv2.imshow("mask2", tmp_mask2)
                         cv2.waitKey(10)
-
+                        """
                         del tmp_gaussian_mask, kp_region_mask, gaussian_mask, unmatched_mask, projection, valid_projection
-                        print("time test", b-a3, c-b, d-c, 'new gaussian feature', torch.count_nonzero(self.gaussians.observation_indices[:, frame.kf_id]>-1))
+                        #print("time test", b-a3, c-b, d-c, 'new gaussian feature', torch.count_nonzero(self.gaussians.observation_indices[:, frame.kf_id]>-1))
 
                     gaussian_indices = torch.arange(self.gaussians.get_xyz.shape[0]).cuda()
                     gaussian_mask = gaussian_indices>=Nold
-                    tmp_gaussian_indices = self.gaussians.observation_indices[gaussian_mask].long()
+                    tmp_gaussian_indices = self.gaussians.observation_indices[gaussian_mask]
 
                     #새로운 가우시안 포인트를 이전 프레임에 전파
+                    for idx in extension_indices[1:]:
+                        kf_idx1 = last_keys[idx]
+                        kf_idx2 = 0
+                        diff = new_kf_idx - idx
+
+                        if diff < 6:
+                            kf_idx2 = cur_frame_idx
+                        elif idx % 5 == 0:
+                            kf_idx2 = last_keys[idx + 5]
+                        else:
+                            kf_idx2 = last_keys[((idx // 5) + 1) * 5]
+
+                        keyframe1 = self.frames[kf_idx1]
+                        keyframe2 = self.frames[kf_idx2]
+
+                        matches = matches_info[kf_idx2][kf_idx1]
+                        gidx, fidx = self.get_gaussian_match_indices(tmp_gaussian_indices, matches[:, 0],
+                                                                     keyframe2.kf_id, n_start=Nold)
+                        self.update_observation(gidx, fidx, matches[:, 1], keyframe1, keyframe1.kf_id)
+
+                    """
+                    #delete
                     for kf_idx in last_keys[-6:-1]:
                         #if kf_idx == cur_frame_idx:
                         #    continue
@@ -2730,22 +2683,6 @@ class EdgeBackEnd(WinBackEnd):
                         self.update_observation(gidx, fidx, matches[:, 1], keyframe, keyframe.kf_id)
                         N2 = torch.count_nonzero(self.gaussians.observation_indices[:, keyframe.kf_id] > -1)
                         print("backend=update_old_kf",kf_idx, N2, N1)
-
-                    if N_window % 5 == 1:
-                        for i in range(N_window-11, -1, -5):
-
-                    ##add match and observation
-                    # get_local_gaussians(self.gaussians, self.current_window)
-                    t1 = time.time()
-                    # temp_obs = self.gaussians.observations[self.gaussians.isfeatured.clone().cpu().numpy()]
-                    a = time.time()
-                    """
-                    temp_kf_window = [x for x in current_window if x != cur_frame_idx]
-                    kf_matches = {}
-                    new_kf_id = frame.kf_id
-
-                    keyframe_keys = list(self.frames)
-                    last_key = keyframe_keys[-2]
                     """
 
                     opt_params = []
@@ -2803,10 +2740,10 @@ class EdgeBackEnd(WinBackEnd):
                     self.keyframe_optimizers = torch.optim.Adam(opt_params)
                     m1 = time.time()
                     remove_ids = None
-                    _, remove_ids1 = self.map_with_ba(self.current_window, iters=iter_per_kf, )  # graph = temp_kf_window,,   matches=kf_matches, graph=current_window
+                    _, remove_ids1 = self.map_with_ba(self.current_window, iters=iter_per_kf, extension_graph=extension_window)  # graph = temp_kf_window,,   matches=kf_matches, graph=current_window
                     if remove_ids1 is not None:
                         remove_ids = remove_ids1
-                    _, remove_ids1 = self.map_with_ba(self.current_window, prune=True, )  # matches = kf_matches, graph = temp_kf_window,,  matches=kf_matches, graph=current_window
+                    _, remove_ids1 = self.map_with_ba(self.current_window, prune=True, extension_graph=extension_window)  # matches = kf_matches, graph = temp_kf_window,,  matches=kf_matches, graph=current_window
                     if remove_ids1 is not None:
                         remove_ids = remove_ids1
                     self.update_occ_visibility(self.current_window)

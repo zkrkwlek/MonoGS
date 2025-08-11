@@ -42,6 +42,7 @@ class EdgeFrontEnd(WinFrontEnd):
         super().__init__(config)
 
         self.frames = {}
+        self.devices = None
 
         self.edge_queue = None
         self.tracking_mode = None
