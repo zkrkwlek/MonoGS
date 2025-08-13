@@ -30,6 +30,7 @@ from typing import Dict, Tuple, Optional, List
 from gsplat import rasterization
 from gsplat.strategy import DefaultStrategy
 from edge_assisted.pose_optimizer import PoseOptimizer, PoseOptimizer2
+from edge_assisted.device_utils import ConvertFramdId
 
 #XFeat
 import sys
@@ -52,32 +53,36 @@ class EdgeFrontEnd(WinFrontEnd):
         self.testManager = None
 
     """"""
-    def cleanup(self, cur_frame_idx):
-        self.cameras[cur_frame_idx].clean()
-        self.frames[cur_frame_idx].clean()
-        if cur_frame_idx % 10 == 0:
+    def cleanup(self, device):
+        self.cameras[ConvertFramdId(device.src, device.cur_frame_idx)].clean()
+        device.frames[device.cur_frame_idx].clean()
+        if device.cur_frame_idx % 10 == 0:
             torch.cuda.empty_cache()
 
-    def request_init(self, cur_frame_idx, viewpoint, depth_map):
-        frame = self.frames[cur_frame_idx]
+    def request_init(self, device, viewpoint, depth_map):
+        frame = device.frames[device.cur_frame_idx]
         f = [frame.keypoints.cpu().clone(), frame.descriptors, frame.objects, frame.contours]
-        msg = ["init", cur_frame_idx, move_camera_to_cpu(viewpoint), depth_map, f]
+        msg = ["init", frame.src, device.cur_frame_idx, move_camera_to_cpu(viewpoint), depth_map, f]
         self.backend_queue.put(msg)
         self.requested_init = True
 
-    def request_keyframe(self, cur_frame_idx, viewpoint, current_window, depthmap):
-        frame = self.frames[cur_frame_idx]
+    def request_keyframe(self, device, viewpoint, current_window, depthmap):
+        frame = device.frames[device.cur_frame_idx]
         f = [frame.keypoints.cpu().clone(), frame.descriptors, frame.objects, frame.contours]
-        msg = ["keyframe", cur_frame_idx, move_camera_to_cpu(viewpoint), (current_window), (depthmap),f]
+        msg = ["keyframe", frame.src, device.cur_frame_idx, move_camera_to_cpu(viewpoint), (current_window), (depthmap),f]
         self.backend_queue.put(msg)
-        self.requested_keyframe += 1
+        device.requested_keyframe += 1
 
     def sync_backend(self, data, prev_frame_idx = None):
-        gaussians = data[1]
-        occ_aware_visibility = data[2]
-        keyframes = data[3]
+        device = self.devices[data[1]]
+        gaussians = data[2]
+        occ_aware_visibility = data[3]
+        keyframes = data[4]
 
+        a = time.time()
         move_gaussianmodel_to_gpu(gaussians)
+        b = time.time()
+        print('frontend::sync', b - a)
         move_occ_visibility_to_gpu(occ_aware_visibility)
         #move_gaussians_to_gpu(keyframes)
 
@@ -112,7 +117,7 @@ class EdgeFrontEnd(WinFrontEnd):
             self.cameras[kf_id].update_RT(kf_R.clone().to(self.device), kf_T.clone().to(self.device))
 
         #update frame gaussianpoints
-        prune_dict = data[4]
+        prune_dict = data[5]
 
         if prune_dict is not None and prev_frame_idx is not None:
             #remove_ids 로 프론트 엔드 매칭 테이블에서 가우시안을 삭제 해야 함.
@@ -120,7 +125,7 @@ class EdgeFrontEnd(WinFrontEnd):
             update_frame_list = [prev_frame_idx, last_kf_id]
 
             for fid in update_frame_list:
-                frame = self.frames[fid]
+                frame = device.frames[fid]
                 #frame.gaussianpoints = torch.full((frame.keypoints.shape[0],),-1)
 
                 """
@@ -165,6 +170,24 @@ class EdgeFrontEnd(WinFrontEnd):
         Ks = torch.from_numpy(K).cuda().unsqueeze(0)  # [1, 3, 3]
 
         return viewmats, Ks
+
+    def initialize(self, device, cur_frame_idx, viewpoint):
+        self.initialized = not self.monocular
+        self.kf_indices = []
+        self.iteration_count = 0
+        self.occ_aware_visibility = {}
+        self.current_window = []
+        # remove everything from the queues
+        while not self.backend_queue.empty():
+            self.backend_queue.get()
+
+        # Initialise the frame at the ground truth pose
+        viewpoint.update_RT(viewpoint.R_gt, viewpoint.T_gt)
+
+        self.kf_indices = []
+        depth_map = self.add_new_keyframe(ConvertFramdId(device.src, cur_frame_idx), init=True)
+        self.request_init(device, viewpoint, depth_map)
+        self.reset = False
 
     def tracking_with_pc(self, cur_frame_idx, prev_frame_idx, viewpoint, colCam, col_param, matches):
         prev = self.cameras[prev_frame_idx]
@@ -739,11 +762,11 @@ class EdgeFrontEnd(WinFrontEnd):
 
         return render_pkg
 
-    def tracking3(self, cur_frame_idx, prev_frame_idx, viewpoint, colCam, col_param, matches_frame = None):
+    def tracking3(self, device, cur_frame_idx, prev_frame_idx, viewpoint, colCam, col_param, matches_frame = None):
 
         matches_frame = torch.from_numpy(matches_frame).cuda().int()
 
-        prev = self.cameras[prev_frame_idx]
+        prev = self.cameras[ConvertFramdId(device.src, prev_frame_idx)]
         viewpoint.update_RT(prev.R, prev.T)
 
         opt_params = []
@@ -788,8 +811,8 @@ class EdgeFrontEnd(WinFrontEnd):
 
         ##depth 정렬 테스트
         with torch.no_grad():
-            prev_frame = self.frames[prev_frame_idx]
-            cur_frame = self.frames[cur_frame_idx]
+            prev_frame = device.frames[prev_frame_idx]
+            cur_frame = device.frames[cur_frame_idx]
 
             #가우시안 프로젝션
             projections, depths, valid_proj = project_pc_to_pixel(self.gaussians.get_xyz, viewpoint.R, viewpoint.T,
@@ -927,7 +950,6 @@ class EdgeFrontEnd(WinFrontEnd):
               self.gaussians._xyz.size()[0], )
 
         return render_pkg
-
 
     def tracking(self, cur_frame_idx, prev_frame_idx, viewpoint, matches = None):
 
@@ -1203,26 +1225,7 @@ class EdgeFrontEnd(WinFrontEnd):
 
         return render_pkg
 
-    def run(self):
-        cur_frame_idx = 0
-        prev_frame_idx = 0
-        projection_matrix = getProjectionMatrix2(
-            znear=0.01,
-            zfar=100.0,
-            fx=self.dataset.fx,
-            fy=self.dataset.fy,
-            cx=self.dataset.cx,
-            cy=self.dataset.cy,
-            W=self.dataset.width,
-            H=self.dataset.height,
-        ).transpose(0, 1)
-        projection_matrix = projection_matrix.to(device=self.device)
-
-        K = np.array([[self.dataset.fx, 0, self.dataset.cx],
-                      [0, self.dataset.fy, self.dataset.cy],
-                      [0, 0, 1]], dtype=np.float32)
-        D = self.dataset.dist_coeffs
-
+    def run_multi(self):
         ##XFeat
         top_k = 4096
         xfeat = XFeat(
@@ -1231,58 +1234,15 @@ class EdgeFrontEnd(WinFrontEnd):
             detection_threshold=0.05
         ).eval().cuda()
 
-        ##colmap
-        colCam = pycolmap.Camera(
-            model="OPENCV",  # 또는 "SIMPLE_RADIAL", "SIMPLE_PINHOLE" 등
-            width=self.dataset.width,
-            height=self.dataset.height,
-            params=[
-                K[0][0],  # fx
-                K[1][1],  # fy
-                K[0][2],  # cx
-                K[1][2],  # cy
-                *D[:4],  # k1, k2, p1, p2 (OPENCV 모델 기준, 필요시 k3 등 추가)
-            ]
-        )
+    def run(self):
 
-        col_param = pycolmap.AbsolutePoseEstimationOptions()
-        col_param.estimate_focal_length = False
-        col_param.ransac.max_error = 4.0
-        col_param.ransac.min_inlier_ratio = 0.2
-        col_param.ransac.min_num_trials = 500
-        col_param.ransac.max_num_trials = 5000
-        col_param.ransac.confidence = 0.99
-        ##colmap
-
-        ##solve pnp
-        reprojection_threshold = np.float32(9.0)
-        confidence = 0.99
-        max_iterations = 1000
-        ##solve pnp
-
-        #gtsam 설정
-        gtsam_prior_noise = gtsam.noiseModel.Diagonal.Variances(np.array([0.002, 0.002, 0.002, 0.002, 0.002, 0.002]))
-        gtsam_closure_noise = gtsam.noiseModel.Diagonal.Variances(np.array([0.005, 0.005, 0.005, 0.02, 0.02, 0.02]))
-
-        gtsam_finalOptResult = gtsam.Values()
-        gtsam_graph = gtsam.NonlinearFactorGraph()
-        gtsam_initial_estimates = gtsam.Values()
-        """
-        gtsamCam = gtsam.Cal3DS2(self.dataset.fx, self.dataset.fy, 0.0, self.dataset.cx, self.dataset.cy,
-                                 self.dataset.dist_coeffs[0], self.dataset.dist_coeffs[1],
-                                 self.dataset.dist_coeffs[2],self.dataset.dist_coeffs[3])
-        """
-        """
-        gtsam_params = gtsam.ISAM2Params()
-        gtsam_params.setFactorization("QR")  # QR 분해 사용
-        gtsam_params.setRelinearizeThreshold(0.01)
-        isam2 = gtsam.ISAM2(gtsam_params)
-        gtsamCam = gtsam.Cal3_S2(self.dataset.fx, self.dataset.fy, 0.0, self.dataset.cx, self.dataset.cy)
-        gtsamPointNoise = gtsam.noiseModel.Isotropic.Sigma(2, 1.0)
-        gtsamPoseNoise = gtsam.noiseModel.Diagonal.Sigmas(np.array([0.1] * 6))  # Pose3: 6D
-        current_estimate = None
-        """
-        # gtsam 설정
+        ##XFeat
+        top_k = 4096
+        xfeat = XFeat(
+            weights='../accelerated_features/weights/xfeat.pt',  # -lighterglue
+            top_k=top_k,
+            detection_threshold=0.05
+        ).eval().cuda()
 
         tic = torch.cuda.Event(enable_timing=True)
         toc = torch.cuda.Event(enable_timing=True)
@@ -1303,6 +1263,7 @@ class EdgeFrontEnd(WinFrontEnd):
             if self.frontend_queue.empty():
                 tic.record()
                 #print("request kf", self.requested_keyframe)
+                """
                 if cur_frame_idx >= len(self.dataset):
                     if self.save_results:
                         eval_ate(
@@ -1317,30 +1278,23 @@ class EdgeFrontEnd(WinFrontEnd):
                             self.gaussians, self.save_dir, "final", final=True
                         )
                     break
-
+                """
                 if self.requested_init:
                     time.sleep(0.01)
                     continue
-
-                if self.single_thread and self.requested_keyframe > 0:
-                    time.sleep(0.01)
-                    continue
-
-                if (not self.initialized or not self.tracking_mode or self.tracking_mode_vo) and self.requested_keyframe > 0:
-                    time.sleep(0.01)
-                    continue
                 frame_start_time = time.time()
-                cur_frame_idx = self.edge_queue.get()
+                cur_data_from_queue = self.edge_queue.get()
 
-                viewpoint = init_from_dataset(
-                    self.dataset, cur_frame_idx, projection_matrix
-                )
+                device = self.devices[cur_data_from_queue[0]]
+                device.cur_frame_idx = cur_data_from_queue[1]
+                viewpoint = device.convert_viewpoint(device.cur_frame_idx)
                 viewpoint.compute_grad_mask(self.config)
+                kf_id = ConvertFramdId(device.src, device.cur_frame_idx)
+                self.cameras[kf_id] = viewpoint
 
-                self.cameras[cur_frame_idx] = viewpoint
+                curr_frame = device.frames[device.cur_frame_idx]
 
-                curr_frame = self.dataset[str(cur_frame_idx)]
-                self.frames[cur_frame_idx] = curr_frame
+                #self.frames[cur_frame_idx] = curr_frame
 
                 #검출
                 kp_time_start = time.time()
@@ -1354,71 +1308,44 @@ class EdgeFrontEnd(WinFrontEnd):
                     del pred
 
                 #curr_frame.inliers = np.zeros((keypoints.shape[0], 1), dtype=np.bool)
-
                 kp_time_temp = time.time()
-
                 points_reshaped = keypoints.reshape(-1, 1, 2)
-                undistorted = cv2.undistortPoints(points_reshaped, K, self.dataset.dist_coeffs, None, K)
-                curr_frame.keypoints = torch.from_numpy(undistorted.reshape(-1, 2)).cuda()
+                if device.distorted:
+                    undistorted = cv2.undistortPoints(points_reshaped, device.K, device.D, None, device.K)
+                    curr_frame.keypoints = torch.from_numpy(undistorted.reshape(-1, 2)).cuda()
+                else:
+                    curr_frame.keypoints = keypoints
                 del undistorted
 
                 kp_time_end = time.time()
                 #print(frame.keypoints)
 
                 ##contour 왜곡 보정
-
                 contours_undistorted = []
                 contours_np = [np.array(cnt, dtype=np.int32).reshape((-1, 1, 2)) for cnt in curr_frame.contours]
+
                 for cnt in contours_np:
                     pts = cnt.astype(np.float32)
-                    undistorted_pts = cv2.undistortPoints(pts, K, self.dataset.dist_coeffs, None, K)
-                    undistorted_pts = undistorted_pts.astype(np.int32)  # 정수형으로 변환
-                    contours_undistorted.append(undistorted_pts)
+                    if device.distorted:
+                        undistorted_pts = cv2.undistortPoints(pts, device.K, device.D, None, device.K)
+                        undistorted_pts = undistorted_pts.astype(np.int32)  # 정수형으로 변환
+                        contours_undistorted.append(undistorted_pts)
+                    else:
+                        contours_undistorted.append(pts)
                 curr_frame.contours = contours_undistorted
-
-                #mask_bool = np.zeros((viewpoint.image_height, viewpoint.image_width), dtype=np.uint8)
-                #cv2.drawContours(mask_bool, contours_undistorted, -1, color=255, thickness=cv2.FILLED)
-                #curr_frame.contours_mask = mask_bool.astype(bool)
-
                 ##contour 왜곡 보정
 
                 if self.reset:
-                    self.initialize(cur_frame_idx, viewpoint)
-                    self.current_window.append(cur_frame_idx)
-
-                    #gtsam initialization
-                    """
-                    gtsamGraph = gtsam.NonlinearFactorGraph()
-                    gtsamInitial = gtsam.Values()
-                    pose_key = cur_frame_idx
-
-                    R = viewpoint.R.clone().detach().cpu().numpy()
-                    quat = Rotation.from_matrix(R).as_quat()  # [x, y, z, w] 순서
-                    w, x, y, z = quat[3], quat[0], quat[1], quat[2]
-                    rot = gtsam.Rot3.Quaternion(w, x, y, z)
-                    t = viewpoint.T.clone().detach().cpu().numpy()
-                    trans = gtsam.Point3(*t)
-
-                    initial_pose = gtsam.Pose3(rot, trans)
-                    gtsamGraph.add(gtsam.PriorFactorPose3(pose_key, initial_pose, gtsamPoseNoise))
-                    gtsamInitial.insert(pose_key, initial_pose)
-
-                    # iSAM2 초기 업데이트
-                    isam2.update(gtsamGraph, gtsamInitial)
-                    current_estimate = isam2.calculateEstimate()
-                    #gtsam init
-                    """
-                    prev_frame_idx = cur_frame_idx
-                    cur_frame_idx += 1
+                    self.initialize(device, device.cur_frame_idx, viewpoint)
+                    self.current_window.append(kf_id)
+                    device.prev_frame_idx = device.cur_frame_idx
+                    device.last_keyframe_idx = device.cur_frame_idx
+                    #device.cur_frame_idx += 1
                     continue
 
                 self.initialized = self.initialized or (
                         len(self.current_window) == self.window_size
                 )
-
-                #if self.initialized :
-                #    print("tracking ", cur_frame_idx, self.requested_keyframe, len(self.edge_queue))
-
                 # Tracking
                 s = time.time()
 
@@ -1426,32 +1353,11 @@ class EdgeFrontEnd(WinFrontEnd):
                     #matching with prev frame
                     match_time_start = time.time()
 
-                    prev_frame = self.frames[(prev_frame_idx)]
+                    prev_frame = device.frames[(device.prev_frame_idx)]
                     cur_matches = self.testManager.tracker.match(prev_frame.descriptors,curr_frame.descriptors)
 
-                    """
-                    prev_frame = self.frames[(prev_frame_idx)]
-                    curr_index = torch.where((prev_frame.gaussianpoints > -1))[0].cpu().numpy() #(curr_frame.gaussianpoints > -1).numpy()#
-                    cur_matches = self.testManager.tracker.match(prev_frame.descriptors[curr_index], curr_frame.descriptors)
-                    cur_matches[:,0] = curr_index[cur_matches[:,0]]
-                    curr_frame.copy_gaussians_from_frame_matches(prev_frame, self.gaussians, cur_matches)
-
-                    #matching with last keyframe
-                    last_keyframe = self.frames[self.current_window[0]]
-                    kf_index = torch.where((last_keyframe.gaussianpoints > -1))[0].cpu().numpy()
-                    kf_matches = self.testManager.tracker.match(last_keyframe.descriptors[kf_index], curr_frame.descriptors)
-                    kf_matches[:, 0] = kf_index[kf_matches[:, 0]]
-                    curr_frame.copy_gaussians_from_frame_matches(last_keyframe, self.gaussians, kf_matches)
-                    """
                     match_time_end = time.time()
-
-                    """
-                    if len(self.current_window) > 2:
-                        render_pkg = self.tracking_with_pc(cur_frame_idx, prev_frame_idx, viewpoint, colCam, col_param, cur_matches)
-                    else:
-                    """
-                    render_pkg = self.tracking3(cur_frame_idx, prev_frame_idx, viewpoint, colCam, col_param, matches_frame=cur_matches)
-
+                    render_pkg = self.tracking3(device, device.cur_frame_idx, device.prev_frame_idx, viewpoint, device.colCam, device.col_param, matches_frame=cur_matches)
                     frame_end_time = time.time()
 
                 else:
@@ -1482,27 +1388,28 @@ class EdgeFrontEnd(WinFrontEnd):
                     )
                 )
 
-                if self.requested_keyframe > 0:
-                    self.cleanup(cur_frame_idx)
-                    prev_frame_idx = cur_frame_idx
-                    cur_frame_idx += 1
+                if device.requested_keyframe > 0:
+                    self.cleanup(device)
+                    device.prev_frame_idx = device.cur_frame_idx
+                    #device.cur_frame_idx += 1
                     continue
 
-                last_keyframe_idx = self.current_window[0]
-                check_time = (cur_frame_idx - last_keyframe_idx) >= self.kf_interval
+                #last_keyframe_idx = self.current_window[0]
+                check_time = (device.cur_frame_idx - device.last_keyframe_idx) >= self.kf_interval
                 curr_visibility = (render_pkg["n_touched"] > 0).long()
+                tmp_last_kf_idx = ConvertFramdId(device.src,device.last_keyframe_idx)
                 create_kf = self.is_keyframe(
-                    cur_frame_idx,
-                    last_keyframe_idx,
+                    kf_id,
+                    tmp_last_kf_idx,
                     curr_visibility,
                     self.occ_aware_visibility,
                 )
                 if len(self.current_window) < self.window_size:
                     union = torch.logical_or(
-                        curr_visibility, self.occ_aware_visibility[last_keyframe_idx]
+                        curr_visibility, self.occ_aware_visibility[tmp_last_kf_idx]
                     ).count_nonzero()
                     intersection = torch.logical_and(
-                        curr_visibility, self.occ_aware_visibility[last_keyframe_idx]
+                        curr_visibility, self.occ_aware_visibility[tmp_last_kf_idx]
                     ).count_nonzero()
                     point_ratio = intersection / union
                     create_kf = (
@@ -1512,8 +1419,9 @@ class EdgeFrontEnd(WinFrontEnd):
                 if self.single_thread:
                     create_kf = check_time and create_kf
                 if create_kf:
+                    device.last_keyframe_idx = device.cur_frame_idx
                     self.current_window, removed = self.add_to_window(
-                        cur_frame_idx,
+                        kf_id,
                         curr_visibility,
                         self.occ_aware_visibility,
                         self.current_window,
@@ -1525,19 +1433,19 @@ class EdgeFrontEnd(WinFrontEnd):
                         )
                         continue
                     depth_map = self.add_new_keyframe(
-                        cur_frame_idx,
+                        kf_id,
                         depth=render_pkg["depth"],
                         opacity=render_pkg["opacity"],
                         init=False,
                     )
 
                     self.request_keyframe(
-                        cur_frame_idx, viewpoint, self.current_window, depth_map
+                        device, viewpoint, self.current_window, depth_map
                     )
                 else:
-                    self.cleanup(cur_frame_idx)
-                prev_frame_idx = cur_frame_idx
-                cur_frame_idx += 1
+                    self.cleanup(device)
+                device.prev_frame_idx = device.cur_frame_idx
+                #cur_frame_idx += 1
 
                 """
                 if (
@@ -1562,15 +1470,17 @@ class EdgeFrontEnd(WinFrontEnd):
                     duration = tic.elapsed_time(toc)
                     time.sleep(max(0.01, 1.0 / 3.0 - duration / 1000))
             else:
-
                 data = self.frontend_queue.get()
 
                 if data[0] == "sync_backend":
-                    self.sync_backend(data, prev_frame_idx=prev_frame_idx)
+                    self.sync_backend(data, )#prev_frame_idx=prev_frame_idx)
 
                 elif data[0] == "keyframe":
-                    self.sync_backend(data, prev_frame_idx=prev_frame_idx)
-                    self.requested_keyframe -= 1
+
+                    self.sync_backend(data, )#prev_frame_idx=prev_frame_idx)
+
+                    device = self.devices[data[1]]
+                    device.requested_keyframe -= 1
 
                 elif data[0] == "init":
                     self.sync_backend(data)
@@ -1579,3 +1489,146 @@ class EdgeFrontEnd(WinFrontEnd):
                 elif data[0] == "stop":
                     Log("Frontend Stopped.")
                     break
+
+    def is_keyframe(
+        self,
+        cur_frame_idx,
+        last_keyframe_idx,
+        cur_frame_visibility_filter,
+        occ_aware_visibility,
+    ):
+        kf_translation = self.config["Training"]["kf_translation"]
+        kf_min_translation = self.config["Training"]["kf_min_translation"]
+        kf_overlap = self.config["Training"]["kf_overlap"]
+
+        curr_frame = self.cameras[cur_frame_idx]
+        last_kf = self.cameras[last_keyframe_idx]
+        pose_CW = getWorld2View2(curr_frame.R, curr_frame.T)
+        last_kf_CW = getWorld2View2(last_kf.R, last_kf.T)
+        last_kf_WC = torch.linalg.inv(last_kf_CW)
+        dist = torch.norm((pose_CW @ last_kf_WC)[0:3, 3])
+        dist_check = dist > kf_translation * self.median_depth
+        dist_check2 = dist > kf_min_translation * self.median_depth
+
+        union = torch.logical_or(
+            cur_frame_visibility_filter, occ_aware_visibility[last_keyframe_idx]
+        ).count_nonzero()
+        intersection = torch.logical_and(
+            cur_frame_visibility_filter, occ_aware_visibility[last_keyframe_idx]
+        ).count_nonzero()
+        point_ratio_2 = intersection / union
+        return (point_ratio_2 < kf_overlap and dist_check2) or dist_check
+
+    def add_to_window(
+        self, cur_frame_idx, cur_frame_visibility_filter, occ_aware_visibility, window
+    ):
+        N_dont_touch = 2
+        window = [cur_frame_idx] + window
+        # remove frames which has little overlap with the current frame
+        curr_frame = self.cameras[cur_frame_idx]
+        to_remove = []
+        removed_frame = None
+        for i in range(N_dont_touch, len(window)):
+            kf_idx = window[i]
+            # szymkiewicz–simpson coefficient
+            intersection = torch.logical_and(
+                cur_frame_visibility_filter, occ_aware_visibility[kf_idx]
+            ).count_nonzero()
+            denom = min(
+                cur_frame_visibility_filter.count_nonzero(),
+                occ_aware_visibility[kf_idx].count_nonzero(),
+            )
+            point_ratio_2 = intersection / denom
+            cut_off = (
+                self.config["Training"]["kf_cutoff"]
+                if "kf_cutoff" in self.config["Training"]
+                else 0.4
+            )
+            if not self.initialized:
+                cut_off = 0.4
+            if point_ratio_2 <= cut_off:
+                to_remove.append(kf_idx)
+
+        if to_remove:
+            window.remove(to_remove[-1])
+            removed_frame = to_remove[-1]
+        kf_0_WC = torch.linalg.inv(getWorld2View2(curr_frame.R, curr_frame.T))
+
+        if len(window) > self.config["Training"]["window_size"]:
+            # we need to find the keyframe to remove...
+            inv_dist = []
+            for i in range(N_dont_touch, len(window)):
+                inv_dists = []
+                kf_i_idx = window[i]
+                kf_i = self.cameras[kf_i_idx]
+                kf_i_CW = getWorld2View2(kf_i.R, kf_i.T)
+                for j in range(N_dont_touch, len(window)):
+                    if i == j:
+                        continue
+                    kf_j_idx = window[j]
+                    kf_j = self.cameras[kf_j_idx]
+                    kf_j_WC = torch.linalg.inv(getWorld2View2(kf_j.R, kf_j.T))
+                    T_CiCj = kf_i_CW @ kf_j_WC
+                    inv_dists.append(1.0 / (torch.norm(T_CiCj[0:3, 3]) + 1e-6).item())
+                T_CiC0 = kf_i_CW @ kf_0_WC
+                k = torch.sqrt(torch.norm(T_CiC0[0:3, 3])).item()
+                inv_dist.append(k * sum(inv_dists))
+
+            idx = np.argmax(inv_dist)
+            removed_frame = window[N_dont_touch + idx]
+            window.remove(removed_frame)
+
+        return window, removed_frame
+
+    def add_new_keyframe(self, cur_frame_idx, depth=None, opacity=None, init=False):
+        rgb_boundary_threshold = self.config["Training"]["rgb_boundary_threshold"]
+        self.kf_indices.append(cur_frame_idx)
+        viewpoint = self.cameras[cur_frame_idx]
+        gt_img = viewpoint.original_image.cuda()
+        valid_rgb = (gt_img.sum(dim=0) > rgb_boundary_threshold)[None]
+        if self.monocular:
+            if depth is None:
+                initial_depth = 2 * torch.ones(1, gt_img.shape[1], gt_img.shape[2])
+                initial_depth += torch.randn_like(initial_depth) * 0.3
+            else:
+                depth = depth.detach().clone()
+                opacity = opacity.detach()
+                use_inv_depth = False
+                if use_inv_depth:
+                    inv_depth = 1.0 / depth
+                    inv_median_depth, inv_std, valid_mask = get_median_depth(
+                        inv_depth, opacity, mask=valid_rgb, return_std=True
+                    )
+                    invalid_depth_mask = torch.logical_or(
+                        inv_depth > inv_median_depth + inv_std,
+                        inv_depth < inv_median_depth - inv_std,
+                    )
+                    invalid_depth_mask = torch.logical_or(
+                        invalid_depth_mask, ~valid_mask
+                    )
+                    inv_depth[invalid_depth_mask] = inv_median_depth
+                    inv_initial_depth = inv_depth + torch.randn_like(
+                        inv_depth
+                    ) * torch.where(invalid_depth_mask, inv_std * 0.5, inv_std * 0.2)
+                    initial_depth = 1.0 / inv_initial_depth
+                else:
+                    median_depth, std, valid_mask = get_median_depth(
+                        depth, opacity, mask=valid_rgb, return_std=True
+                    )
+                    invalid_depth_mask = torch.logical_or(
+                        depth > median_depth + std, depth < median_depth - std
+                    )
+                    invalid_depth_mask = torch.logical_or(
+                        invalid_depth_mask, ~valid_mask
+                    )
+                    depth[invalid_depth_mask] = median_depth
+                    initial_depth = depth + torch.randn_like(depth) * torch.where(
+                        invalid_depth_mask, std * 0.5, std * 0.2
+                    )
+
+                initial_depth[~valid_rgb] = 0  # Ignore the invalid rgb pixels
+            return initial_depth.cpu().numpy()[0]
+        # use the observed depth
+        initial_depth = torch.from_numpy(viewpoint.depth).unsqueeze(0)
+        initial_depth[~valid_rgb.cpu()] = 0  # Ignore the invalid rgb pixels
+        return initial_depth[0].numpy()

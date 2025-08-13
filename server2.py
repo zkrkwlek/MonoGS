@@ -143,7 +143,7 @@ def resdepthanything(id,src):
 
                 frame = slam.AddFrame(fid, image, R, t, depth=depth, src=src)
                 # slam.SetDepth(id, depth)
-                slam.edge_queue.put(id)
+                slam.edge_queue.put([src, id])
 
                 # ss = time.time()
                 # list<cv2.Keypoint?>, numpy.ndarray

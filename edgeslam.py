@@ -125,34 +125,42 @@ class EdgeGSSLAM(SLAM_WIN):
         self.frontend.devices = self.devices
 
     def AddDevice(self, src, K, D, w, h):
-        self.devices[src] = Device(K, D, w, h)
+        self.devices[src] = Device(src, K, D, w, h)
 
     def AddFrame(self, fid, img, R, t, depth = None, src = None):
-        if fid in self.dataset:
-            f = self.dataset[str(fid)]
+        device = self.devices[src]
+        if fid in device.frames:
+            #f = self.dataset[str(fid)]
+            f = device.frames[fid]
             f.color = img
             f.depth = depth
             f.UpdatePose(R,t)
         else:
             f = EdgeFrame(fid, img, R, t, depth=depth, src=src)
-            self.dataset[fid] = f
+            device.frames[fid] = f
+            #self.dataset[fid] = f
         return f
 
     def AddContours(self, fid, contours, src=None):
-        if fid in self.dataset:
-            f = self.dataset[str(fid)]
+        device = self.devices[src]
+        if fid in device.frames:
+            #f = self.dataset[str(fid)]
+            f = device.frames[fid]
         else:
             f = EdgeFrame(fid, None, None, None, src=src)
-            self.dataset[fid] = f
+            #self.dataset[fid] = f
+            device.frames[fid] = f
         f.contours = contours
 
     def AddObjectBBox(self, fid, oid, bbox, src=None):
-
-        if fid in self.dataset:
-            f = self.dataset[str(fid)]
+        device = self.devices[src]
+        if fid in device.frames:
+            #f = self.dataset[str(fid)]
+            f = device.frames[fid]
         else:
             f = EdgeFrame(fid, None,None,None,src=src)
-            self.dataset[fid] = f
+            #self.dataset[fid] = f
+            device.frames[fid] = f
         if oid not in self.object_manager:
             self.object_manager[oid] = Object(oid)
         obj = self.object_manager[oid]

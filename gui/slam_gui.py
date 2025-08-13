@@ -586,7 +586,7 @@ class SLAM_GUI:
         elif self.opacity_chbox.checked:
             opacity = results["opacity"]
             opacity = opacity[0, :, :].detach().cpu().numpy()
-            max_opacity = np.max(opacity)
+            max_opacity = np. max(opacity)
             opacity = imgviz.depth2rgb(
                 opacity, min_value=0.0, max_value=max_opacity, colormap="jet"
             )

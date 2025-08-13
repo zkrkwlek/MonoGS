@@ -1,4 +1,4 @@
-from gui.slam_gui import SLAM_GUI
+afrom gui.slam_gui import SLAM_GUI
 import torch
 import open3d as o3d
 import imgviz

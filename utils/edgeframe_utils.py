@@ -15,6 +15,7 @@ class EdgeFrame:
         self.color = color #수정 안함.
         self.depth = depth #수정 안함
         self.src = src
+        self.is_keyframe = False
 
         ##오브젝트 영역
         ##데이터 수정 가능
