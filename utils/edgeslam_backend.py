@@ -32,18 +32,19 @@ from edge_assisted.gaussian_orb_model import GaussianOrbModel
 from edge_assisted.device_utils import ConvertFramdId
 
 from collections import defaultdict
+import psutil
 
 #alike + lightglue
-import sys
-sys.path.append('D:/UVR/LightGlue')
-from lightglue import LightGlue, SuperPoint, ALIKED, DISK
-from lightglue.utils import load_image, rbd, numpy_image_to_torch
-from lightglue import viz2d
+#import sys
+#sys.path.append('D:/UVR/LightGlue')
+#from lightglue import LightGlue, SuperPoint, ALIKED, DISK
+#from lightglue.utils import load_image, rbd, numpy_image_to_torch
+#from lightglue import viz2d
 
 #XFeat
-sys.path.append('D:/UVR/accelerated_features')
-from modules.xfeat import XFeat
-from modules.lighterglue import LighterGlue
+#sys.path.append('D:/UVR/accelerated_features')
+#from modules.xfeat import XFeat
+#from modules.lighterglue import LighterGlue
 
 class EdgeBackEnd(WinBackEnd):
     def __init__(self, config):
@@ -63,6 +64,9 @@ class EdgeBackEnd(WinBackEnd):
         self.weight_ba = 0.03
         self.weight_patch = 0.15
         self.next_kf_id = 0
+
+        #xfeat
+        self.feature_manager = None
 
         #object
         self.objects = None
@@ -95,7 +99,7 @@ class EdgeBackEnd(WinBackEnd):
         msg = [tag, src, move_gaussianmodel_to_cpu(self.gaussians), move_occ_visibility_to_cpu(self.occ_aware_visibility), (keyframes), (prune_data)]
         self.frontend_queue.put(msg)
         c = time.time()
-        print('backend::sync', b-a, c-b)
+        #print('backend::sync', b-a, c-b)
 
     def reset(self):
         self.iteration_count = 0
@@ -738,6 +742,8 @@ class EdgeBackEnd(WinBackEnd):
         return render_pkg
 
     def initialize_map_with_ba(self, cur_frame_idx, viewpoint):
+        p = psutil.Process()
+
         t0 = time.time()
         t1 = 0.0
         t2 = 0.0
@@ -754,6 +760,7 @@ class EdgeBackEnd(WinBackEnd):
         nPrune = 0
 
         curr_frame = self.frames[(cur_frame_idx)]
+
         for mapping_iteration in range(self.init_itr_num):
             self.iteration_count += 1
 
@@ -795,6 +802,7 @@ class EdgeBackEnd(WinBackEnd):
             t4 = t4+time.time()
             loss_init.backward()
             t5 = t5+time.time()
+
             with torch.no_grad():
                 self.gaussians.max_radii2D[visibility_filter] = torch.max(
                     self.gaussians.max_radii2D[visibility_filter],
@@ -841,6 +849,7 @@ class EdgeBackEnd(WinBackEnd):
                 self.gaussians.optimizer.step()
                 self.gaussians.optimizer.zero_grad(set_to_none=True)
                 t12 += time.time()
+
             print('initialize_map', self.iteration_count, self.init_itr_num, self.gaussians.get_xyz.shape)
 
         self.occ_aware_visibility[cur_frame_idx] = (n_touched > 0).long()
@@ -2334,6 +2343,7 @@ class EdgeBackEnd(WinBackEnd):
 
     def run_with_ba(self):
         prune_dict = None
+        p = psutil.Process()
 
         # test
         new_gaussians = GaussianOrbModel(self.gaussians.max_sh_degree, self.gaussians.config)
@@ -2342,19 +2352,23 @@ class EdgeBackEnd(WinBackEnd):
         # test
 
         #lightglue
-        light_glue_matcher = LightGlue(features="aliked").eval().cuda()
-        extractor = ALIKED(max_num_keypoints=2048).eval().cuda()
+        #light_glue_matcher = LightGlue(features="aliked").eval().cuda()
+        #extractor = ALIKED(max_num_keypoints=2048).eval().cuda()
 
         #xfeat
+        """
         top_k = 4096
         xfeat = XFeat(
             weights='../accelerated_features/weights/xfeat.pt', #-lighterglue
             top_k=top_k,
             detection_threshold=0.05
         ).eval().cuda()
-        xfeat.lighterglue = LighterGlue(weights='../accelerated_features/weights/xfeat-lighterglue.pt').eval().cuda()
+        """
         matches_info = {}
         extension_window = None
+
+        #map init
+        bMapInit = False
 
         while True:
             if self.backend_queue.empty():
@@ -2370,9 +2384,9 @@ class EdgeBackEnd(WinBackEnd):
                     continue
 
                 s = time.time()
-
                 prune_mask = None
                 _, prune_mask1 = self.map_with_ba(self.current_window, extension_graph=extension_window)#matches=kf_matches, graph=current_window)  # matches = kf_matches, graph = recent_keys
+
                 if prune_mask1 is not None:
                     prune_mask = prune_mask1
                 if self.last_sent >= 10:
@@ -2380,12 +2394,13 @@ class EdgeBackEnd(WinBackEnd):
                     if prune_mask2 is not None:
                         prune_mask = prune_mask2
 
-                src = 'gs_test_0'
-                if prune_mask is not None:
-                    self.push_to_frontend(src, prune=prune_mask)
-                else:
-                    self.push_to_frontend(src, )
-                e = time.time()
+                    src = 'gs_test_0'
+                    if prune_mask is not None:
+                        self.push_to_frontend(src, prune=prune_mask)
+                    else:
+                        self.push_to_frontend(src, )
+                    e = time.time()
+
                 #print("backend = mapping with empty queue", (e-s), self.gaussians.get_xyz.shape[0])
                 gc.collect()
                 torch.cuda.empty_cache()
@@ -2402,6 +2417,8 @@ class EdgeBackEnd(WinBackEnd):
                 elif data[0] == "color_refinement":
                     self.color_refinement()
                     self.push_to_frontend()
+                elif data[0] == "sync":
+                    pass
                 elif data[0] == "init":
                     src = data[1]
                     cur_frame_idx = data[2]
@@ -2429,13 +2446,15 @@ class EdgeBackEnd(WinBackEnd):
                     self.viewpoints[tmp_id] = viewpoint
 
                     #mask
+                    """
                     kp_region_mask = calculate_feature_mask(frame.keypoints, viewpoint.image_width,
                                                             viewpoint.image_height, max_radius=2)
+                    """
                     kp_mask = calculate_keypoint_mask(frame.keypoints, viewpoint.image_width,
                                                             viewpoint.image_height,)
                     self.preprocessing_add_kf()
                     self.add_next_kf(
-                        frame.kf_id, viewpoint, depth_map=depth_map, init=True, mask = (~kp_region_mask).squeeze(0).cpu().numpy()
+                        frame.kf_id, viewpoint, depth_map=depth_map, init=True, mask = (~kp_mask).squeeze(0).cpu().numpy()
                     )
                     self.add_next_kf(
                         frame.kf_id, viewpoint, depth_map=depth_map, init=True,keypoints=frame.keypoints,
@@ -2537,7 +2556,7 @@ class EdgeBackEnd(WinBackEnd):
                         d1 = {'keypoints': keyframe.keypoints,
                               'descriptors': torch.from_numpy(keyframe.descriptors).cuda(),
                               'image_size': (viewpoint.image_width, viewpoint.image_height)}
-                        matches = xfeat.match_lighterglue(d0, d1)
+                        matches = self.feature_manager.match_lightglue(d0, d1)
                         matches_info[tmp_id][kf_idx] = matches.int()
                         matches_info[kf_idx][tmp_id] = matches[:, [1, 0]].int()
 
@@ -2627,7 +2646,7 @@ class EdgeBackEnd(WinBackEnd):
                     with torch.no_grad():
                         a = time.time()
                         #keypoint mask
-                        kp_region_mask = calculate_feature_mask(frame.keypoints, viewpoint.image_width, viewpoint.image_height,max_radius=2)
+                        #kp_region_mask = calculate_feature_mask(frame.keypoints, viewpoint.image_width, viewpoint.image_height,max_radius=2)
                         aa1 = time.time()
                         ##gaussian mask
                         #1) projection
@@ -2637,9 +2656,11 @@ class EdgeBackEnd(WinBackEnd):
                         tmp_gaussian_mask = calculate_keypoint_mask(projection[valid_projection], viewpoint.image_width, viewpoint.image_height, )#max_radius=1)#.squeeze(0)
                         aa3 = time.time()
                         tmp_gaussian_mask = ~tmp_gaussian_mask
-                        gaussian_mask = torch.logical_and(~kp_region_mask, tmp_gaussian_mask)
+                        #gaussian_mask = torch.logical_and(~kp_region_mask, tmp_gaussian_mask)
+                        gaussian_mask = tmp_gaussian_mask
                         a1 = time.time()
                         #print('1',aa1-a, aa2-aa1, aa3-aa2, aa3-a1, projection.device, tmp_gaussian_mask.device, gaussian_mask.device)
+
                         unmatched_mask = ~kp_gaussian_mask
                         kp_mask = calculate_keypoint_mask(frame.keypoints[unmatched_mask], viewpoint.image_width, viewpoint.image_height,)
                         kp_mask = torch.logical_and(kp_mask, tmp_gaussian_mask)
@@ -2656,7 +2677,7 @@ class EdgeBackEnd(WinBackEnd):
                         cv2.imshow("mask2", tmp_mask2)
                         cv2.waitKey(10)
                         """
-                        del tmp_gaussian_mask, kp_region_mask, gaussian_mask, unmatched_mask, projection, valid_projection
+                        del tmp_gaussian_mask, gaussian_mask, unmatched_mask, projection, valid_projection
                         #print("time test", b-a3, c-b, d-c, 'new gaussian feature', torch.count_nonzero(self.gaussians.observation_indices[:, frame.kf_id]>-1))
 
                     gaussian_indices = torch.arange(self.gaussians.get_xyz.shape[0]).cuda()
@@ -2698,7 +2719,7 @@ class EdgeBackEnd(WinBackEnd):
                         N2 = torch.count_nonzero(self.gaussians.observation_indices[:, keyframe.kf_id] > -1)
                         print("backend=update_old_kf",kf_idx, N2, N1)
                     """
-                    print('window test',self.current_window)
+                    #print('window test',self.current_window)
                     opt_params = []
                     frames_to_optimize = self.config["Training"]["pose_window"]
                     iter_per_kf = self.mapping_itr_num if self.single_thread else 10
@@ -2849,6 +2870,7 @@ class EdgeBackEnd(WinBackEnd):
         new_gaussians.training_setup(self.gaussians.opt_params)
         #test
 
+        p = psutil.Process()
 
         while True:
             if self.backend_queue.empty():
@@ -2867,6 +2889,7 @@ class EdgeBackEnd(WinBackEnd):
 
                 prune_mask = None
                 _, prune_mask1 = self.map(self.current_window,)#matches = kf_matches, graph = recent_keys
+
                 if prune_mask1 is not None:
                     prune_mask = prune_mask1
                 if self.last_sent >= 10:
@@ -2874,10 +2897,12 @@ class EdgeBackEnd(WinBackEnd):
                     if prune_mask2 is not None:
                         prune_mask = prune_mask2
                 self.update_occ_visibility(self.current_window)
+
                 if prune_mask is not None:
                     self.push_to_frontend(prune=prune_mask)
                 else:
                     self.push_to_frontend()
+
                 e = time.time()
 
             else:

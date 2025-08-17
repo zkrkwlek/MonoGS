@@ -343,12 +343,13 @@ class GaussianPointManager:
     def __init__(self):
 
         self.points = None
-
+        """
         self.feature_model = ALIKED(model_name='aliked-t16',
                   device='cuda:0',
                   top_k=-1,
                   scores_th=0.2,
                   n_limit=3000)
+        """
         self.tracker = SimpleTracker()
 
         pass

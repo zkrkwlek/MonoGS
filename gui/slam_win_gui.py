@@ -42,8 +42,11 @@ class SLAM_WIN_GUI(SLAM_GUI):
             self.init = True
 
         if gaussian_packet.current_frame is not None:
+            src = gaussian_packet.current_frame.src
+            color = gaussian_packet.current_frame.color
+
             frustum = self.add_camera(
-                gaussian_packet.current_frame, name="current", color=[0, 1, 0]
+                gaussian_packet.current_frame, name= src, color= color#"current", [0, 1, 0]
             )
             if self.followcam_chbox.checked:
                 viewpoint = (

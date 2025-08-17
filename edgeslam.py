@@ -1,3 +1,4 @@
+import multiprocessing
 
 import torch
 from munch import munchify
@@ -19,6 +20,7 @@ from utils.multiprocessing_utils import FakeQueue
 from edge_assisted.device_utils import Device
 from edge_assisted.object_manager import Object, ObjectManager
 
+from edge_assisted.feature_manager import FeatureManager
 
 class EdgeGSSLAM(SLAM_WIN):
     def __init__(self, config, tracking_mode=False, mapping_update_pose = False, save_dir=None):
@@ -77,9 +79,15 @@ class EdgeGSSLAM(SLAM_WIN):
         self.frontend = EdgeFrontEnd(self.config)
         self.backend = EdgeBackEnd(self.config)
 
-        FeatureManager = GaussianPointManager()
-        self.frontend.testManager = FeatureManager
-        self.backend.FeatureManager = FeatureManager
+        #안쓰임
+        FeatureManagerA = GaussianPointManager()
+        self.frontend.testManager = FeatureManagerA
+        self.backend.FeatureManager = FeatureManagerA
+
+        #xfeat
+        XFeat = FeatureManager()
+        self.frontend.feature_manager = XFeat
+        self.backend.feature_manager = XFeat
 
         frontend_queue = Queue()
         backend_queue = Queue()
@@ -124,8 +132,14 @@ class EdgeGSSLAM(SLAM_WIN):
         self.backend.devices  = self.devices
         self.frontend.devices = self.devices
 
-    def AddDevice(self, src, K, D, w, h):
-        self.devices[src] = Device(src, K, D, w, h)
+    def AddDevice(self, src, K, D, w, h, bMapper = True):
+        device = Device(src, K, D, w, h, bMapper = bMapper)
+        self.devices[src] = device
+
+    def Alignment(self, src, idx):
+        device = self.devices[src]
+        p = threading.Thread(target = self.frontend.coordinate_alignment, args=(device, idx))
+        p.start()
 
     def AddFrame(self, fid, img, R, t, depth = None, src = None):
         device = self.devices[src]
@@ -141,6 +155,21 @@ class EdgeGSSLAM(SLAM_WIN):
             #self.dataset[fid] = f
         return f
 
+    def AddPlaceRecogDesc(self, fid, desc, src = None):
+        device = self.devices[src]
+        if fid in device.frames:
+            f = device.frames[fid]
+        else:
+            f = EdgeFrame(fid, None, None, None, src=src)
+            device.frames[fid] = f
+
+        f.pr_desc = torch.from_numpy(desc).unsqueeze(0)
+        if device.poses is None and not device.mapper:
+            #self.frontend.relocalization(device, fid)
+            p = threading.Thread(target=self.frontend.relocalization, args=(device, fid))
+            p.start()
+
+
     def AddContours(self, fid, contours, src=None):
         device = self.devices[src]
         if fid in device.frames:
@@ -148,9 +177,8 @@ class EdgeGSSLAM(SLAM_WIN):
             f = device.frames[fid]
         else:
             f = EdgeFrame(fid, None, None, None, src=src)
-            #self.dataset[fid] = f
             device.frames[fid] = f
-        f.contours = contours
+        f.contours =  contours
 
     def AddObjectBBox(self, fid, oid, bbox, src=None):
         device = self.devices[src]

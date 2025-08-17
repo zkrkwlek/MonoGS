@@ -120,7 +120,7 @@ def move_gaussianpacket_to_gpu(cpu_packet, device="cuda", training_args=None):
     # Camera 배열 변환
     if cpu_packet.keyframes is not None:
         for kf in cpu_packet.keyframes:
-            move_camera_to_gpu(kf, device)
+            move_camera_to_gpu_gui(kf, device)
 
     # 이미지 텐서들 변환
     for attr in ['gtcolor', 'gtdepth', 'gtnormal']:
@@ -198,6 +198,29 @@ def move_camera_to_gpu(cpu_camera, device="cuda"):
 
     cpu_camera.device = device
 
+def move_camera_to_cpu_gui(camera):
+    cpu_camera = copy.deepcopy(camera)
+
+    # 텐서 속성들
+    tensor_attrs = ['R', 'T', 'R_gt', 'T_gt','projection_matrix']
+    for attr in tensor_attrs:
+        if hasattr(cpu_camera, attr):
+            tensor = getattr(cpu_camera, attr)
+            if isinstance(tensor, torch.Tensor):
+                setattr(cpu_camera, attr, tensor.detach().clone().cpu())
+    cpu_camera.device = "cpu"
+    return cpu_camera
+
+
+def move_camera_to_gpu_gui(cpu_camera, device="cuda"):
+    # 텐서 속성들
+    tensor_attrs = ['R', 'T', 'R_gt', 'T_gt','projection_matrix']
+    for attr in tensor_attrs:
+        if hasattr(cpu_camera, attr):
+            tensor = getattr(cpu_camera, attr)
+            if isinstance(tensor, torch.Tensor):
+                setattr(cpu_camera, attr, tensor.to(device))
+    cpu_camera.device = device
 
 def move_gaussianmodel_to_cpu(gaussians):
     cpu_gaussians = copy.deepcopy(gaussians)

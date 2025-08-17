@@ -1,3 +1,5 @@
+import os
+
 import cv2
 import torch
 import time
@@ -31,18 +33,16 @@ from gsplat import rasterization
 from gsplat.strategy import DefaultStrategy
 from edge_assisted.pose_optimizer import PoseOptimizer, PoseOptimizer2
 from edge_assisted.device_utils import ConvertFramdId
+from edge_assisted.place_recognizer import PlaceRecognizer
 
-#XFeat
-import sys
-sys.path.append('D:/UVR/accelerated_features')
-from modules.xfeat import XFeat
-from modules.lighterglue import LighterGlue
+import psutil
 
 class EdgeFrontEnd(WinFrontEnd):
     def __init__(self, config):
         super().__init__(config)
 
         self.frames = {}
+        self.keyframes = {}
         self.devices = None
 
         self.edge_queue = None
@@ -51,6 +51,9 @@ class EdgeFrontEnd(WinFrontEnd):
 
         #self.testManager = GaussianPointManager()
         self.testManager = None
+
+        self.feature_manager = None
+        self.place_recognizer = PlaceRecognizer()
 
     """"""
     def cleanup(self, device):
@@ -82,7 +85,7 @@ class EdgeFrontEnd(WinFrontEnd):
         a = time.time()
         move_gaussianmodel_to_gpu(gaussians)
         b = time.time()
-        print('frontend::sync', b - a)
+        #print('frontend::sync', b - a)
         move_occ_visibility_to_gpu(occ_aware_visibility)
         #move_gaussians_to_gpu(keyframes)
 
@@ -170,6 +173,36 @@ class EdgeFrontEnd(WinFrontEnd):
         Ks = torch.from_numpy(K).cuda().unsqueeze(0)  # [1, 3, 3]
 
         return viewmats, Ks
+
+    def relocalization(self, device, fid):
+        a = time.time()
+        viewpoint = device.convert_viewpoint(fid)
+        viewpoint.compute_grad_mask(self.config)
+        frame = device.frames[fid]
+        #frame.pr_desc = self.get_pr_descriptor(viewpoint.original_image, )
+        near_kf = self.place_recognizer.place_recognition(frame.pr_desc, self.keyframes)
+        b = time.time()
+        if near_kf is not None:
+            self.tracking_multi(device, fid, near_kf, viewpoint)
+            c = time.time()
+            print("relocalization=",device.src, fid, b-a, c-b)
+        else:
+            print('fail search place recognition')
+
+        #print("relocalization", near_kf)
+    def localization(self):
+        pass
+
+    def coordinate_alignment(self, device, cur_frame_idx):
+        device.prev_frame_idx = device.cur_frame_idx
+        device.cur_frame_idx = cur_frame_idx
+        #print('alignemtn test', device.src, cur_frame_idx, device.prev_frame_idx)
+        if device.poses is None:
+            #request salad and relocalization after commnunication
+            pass
+        else:
+            self.localization()
+
 
     def initialize(self, device, cur_frame_idx, viewpoint):
         self.initialized = not self.monocular
@@ -890,8 +923,7 @@ class EdgeFrontEnd(WinFrontEnd):
             match_idx = find_correspondence_with_dist(projections, prev_keypoints, th=7)  # 약간 시간이 걸림. 0.01 이하
             valid_match = (match_idx > -1)  # & self.gaussians.isfeatured[valid]
             valid_idx = torch.where(valid_match & valid_proj)[0]  # 유효한 이미지 안의 프로젝션 검출. 매치 인덱스 값이 들어갈 곳.
-            feature_mask = calculate_feature_mask(cur_frame.keypoints, viewpoint.image_width, viewpoint.image_height,
-                                                  max_radius=5)
+            #feature_mask = calculate_feature_mask(cur_frame.keypoints, viewpoint.image_width, viewpoint.image_height, max_radius=5)
             viewpoint.update_RT(R, t)
 
         for tracking_itr in range(self.tracking_itr_num):
@@ -909,7 +941,7 @@ class EdgeFrontEnd(WinFrontEnd):
             t2 = t2 + time.time()
 
             t3+=time.time()
-            loss_tracking = get_loss_tracking(self.config, image, depth, opacity, viewpoint, feature_mask=feature_mask)
+            loss_tracking = get_loss_tracking(self.config, image, depth, opacity, viewpoint, )#feature_mask=feature_mask)
 
             t4 = t4+time.time()
             pose_optimizer.zero_grad()
@@ -921,6 +953,8 @@ class EdgeFrontEnd(WinFrontEnd):
                 converged = update_pose(viewpoint)
 
             if tracking_itr % 10 == 0:
+                viewpoint.src = device.src
+                viewpoint.color = [0,1,0]
                 self.q_main2vis.put(
                     move_gaussianpacket_to_cpu(
                         gui_utils.GaussianPacket(
@@ -937,7 +971,7 @@ class EdgeFrontEnd(WinFrontEnd):
             if converged:
                 break
 
-        self.median_depth = get_median_depth(depth, opacity)
+        device.median_depth = get_median_depth(depth, opacity)
 
         with torch.no_grad():
             render_pkg = render(
@@ -951,18 +985,93 @@ class EdgeFrontEnd(WinFrontEnd):
 
         return render_pkg
 
+    def tracking_multi(self, device, cur_frame_idx, prev_frame_idx, viewpoint):
+        prev = self.cameras[prev_frame_idx]
+        viewpoint.update_RT(prev.R, prev.T)
+
+        opt_params = []
+        opt_params.append(
+            {
+                "params": [viewpoint.cam_rot_delta],
+                "lr": self.config["Training"]["lr"]["cam_rot_delta"],
+                "name": "rot_{}".format(viewpoint.uid),
+            }
+        )
+        opt_params.append(
+            {
+                "params": [viewpoint.cam_trans_delta],
+                "lr": self.config["Training"]["lr"]["cam_trans_delta"],
+                "name": "trans_{}".format(viewpoint.uid),
+            }
+        )
+
+        opt_params.append(
+            {
+                "params": [viewpoint.exposure_a],
+                "lr": 0.01,
+                "name": "exposure_a_{}".format(viewpoint.uid),
+            }
+        )
+        opt_params.append(
+            {
+                "params": [viewpoint.exposure_b],
+                "lr": 0.01,
+                "name": "exposure_b_{}".format(viewpoint.uid),
+            }
+        )
+
+        t_n = 0
+        pose_optimizer = torch.optim.Adam(opt_params)
+
+        for tracking_itr in range(self.tracking_itr_num):
+
+            render_pkg = render(
+                viewpoint, self.gaussians, self.pipeline_params, self.background, #mask = valid_idx
+            )
+
+            image, depth, opacity = (
+                render_pkg["render"],
+                render_pkg["depth"],
+                render_pkg["opacity"],
+            )
+
+            loss_tracking = get_loss_tracking(self.config, image, depth, opacity, viewpoint, )#feature_mask=feature_mask)
+
+            pose_optimizer.zero_grad()
+            loss_tracking.backward()
+
+            t_n = t_n+1
+            with torch.no_grad():
+                pose_optimizer.step()
+                converged = update_pose(viewpoint)
+
+            if tracking_itr % 10 == 0:
+                viewpoint.src = device.src
+                viewpoint.color = device.color
+                self.q_main2vis.put(
+                    move_gaussianpacket_to_cpu(
+                        gui_utils.GaussianPacket(
+                            #gaussians=(gaussians),
+                            current_frame=viewpoint,
+                            gtcolor=viewpoint.original_image,
+                            gtdepth=viewpoint.depth
+                            if not self.monocular
+                            else np.zeros((viewpoint.image_height, viewpoint.image_width)),
+                        )
+                    )
+                )
+
+            if converged:
+                break
+        print("relocalization test", cur_frame_idx, t_n)
+        self.median_depth = get_median_depth(depth, opacity)
+        return render_pkg
+
     def tracking(self, cur_frame_idx, prev_frame_idx, viewpoint, matches = None):
 
 
         prev = self.cameras[prev_frame_idx]
         viewpoint.update_RT(prev.R, prev.T)
-        """
-        curr_frame = self.frames[cur_frame_idx]
-        T = torch.eye(4, device='cuda')
-        R = curr_frame.T[:3,:3]
-        t = curr_frame.T[:3, 3]
-        viewpoint.update_RT(R, t)
-        """
 
         opt_params = []
         opt_params.append(
@@ -1004,6 +1113,7 @@ class EdgeFrontEnd(WinFrontEnd):
         t5 = 0.0
         t_n = 0
 
+        """
         ##depth 정렬 테스트
         with torch.no_grad():
             projections, depths, valid_proj = project_pc_to_pixel(self.gaussians.get_xyz, viewpoint.R, viewpoint.T,
@@ -1028,11 +1138,11 @@ class EdgeFrontEnd(WinFrontEnd):
             b = time.time()
             #print('tracking matching test', b-a, torch.count_nonzero(valid_idx), self.gaussians.get_xyz.shape[0],
             #      gaussians._xyz.shape[0])
-
+        """
         for tracking_itr in range(self.tracking_itr_num):
             t1 = t1+time.time()
             render_pkg = render(
-                viewpoint, self.gaussians, self.pipeline_params, self.background, mask = valid_idx
+                viewpoint, self.gaussians, self.pipeline_params, self.background, #mask = valid_idx
             )
 
             image, depth, opacity = (
@@ -1044,7 +1154,7 @@ class EdgeFrontEnd(WinFrontEnd):
             t2 = t2 + time.time()
 
             t3+=time.time()
-            loss_tracking = get_loss_tracking(self.config, image, depth, opacity, viewpoint, feature_mask=feature_mask)
+            loss_tracking = get_loss_tracking(self.config, image, depth, opacity, viewpoint, )#feature_mask=feature_mask)
 
             t4 = t4+time.time()
             pose_optimizer.zero_grad()
@@ -1169,6 +1279,7 @@ class EdgeFrontEnd(WinFrontEnd):
             """
             ##visualize test
 
+            """
             ##visualize test - feature
             projection, _, valid_projection = project_pc_to_pixel(self.gaussians.get_xyz,
                                                                   viewpoint.R,
@@ -1192,7 +1303,7 @@ class EdgeFrontEnd(WinFrontEnd):
                 cv2.line(out, p1, p2, (0, 255, 0), 2, lineType=16)
                 cv2.circle(out, p1, 1, (0, 0, 255), -1, lineType=16)
                 cv2.circle(out, p2, 1, (255, 0, 0), -1, lineType=16)
-
+            """
             #points1 = projection[valid_projection].detach().cpu().numpy()
             #points2 = cur_frame.keypoints.detach()
             #points3 = projection[valid_projection & self.gaussians.isfeatured]
@@ -1216,36 +1327,26 @@ class EdgeFrontEnd(WinFrontEnd):
                 p1 = (int(round(pt1[0])), int(round(pt1[1])))
                 cv2.circle(out, p1, 3, (0, 255, 255), 1, lineType=16)
             """
-            cv2.imwrite('./res/test_ba/tracking_' + str(cur_frame_idx) + '.jpg', out)
+            #cv2.imwrite('./res/test_ba/tracking_' + str(cur_frame_idx) + '.jpg', out)
             ##visualize test - feature
 
+            """
             print("tracking processig time", cur_frame_idx, 'obj', len(cur_frame.objects), len(cur_frame.contours), t_n, 'match', torch.count_nonzero(match_res > -1), points2.shape,
                   'render', (t2 - t1), 'proj', (t3 - t2), 'loss', (t4 - t3), 'backward', (t5 - t4),
                   self.gaussians._xyz.size()[0], )
-
+            """
         return render_pkg
 
     def run_multi(self):
         ##XFeat
-        top_k = 4096
-        xfeat = XFeat(
-            weights='../accelerated_features/weights/xfeat.pt',  # -lighterglue
-            top_k=top_k,
-            detection_threshold=0.05
-        ).eval().cuda()
+        pass
 
     def run(self):
 
-        ##XFeat
-        top_k = 4096
-        xfeat = XFeat(
-            weights='../accelerated_features/weights/xfeat.pt',  # -lighterglue
-            top_k=top_k,
-            detection_threshold=0.05
-        ).eval().cuda()
-
         tic = torch.cuda.Event(enable_timing=True)
         toc = torch.cuda.Event(enable_timing=True)
+
+        p = psutil.Process()
 
         while True:
             if self.q_vis2main.empty():
@@ -1261,6 +1362,7 @@ class EdgeFrontEnd(WinFrontEnd):
                     self.backend_queue.put(["unpause"])
 
             if self.frontend_queue.empty():
+
                 tic.record()
                 #print("request kf", self.requested_keyframe)
                 """
@@ -1282,6 +1384,11 @@ class EdgeFrontEnd(WinFrontEnd):
                 if self.requested_init:
                     time.sleep(0.01)
                     continue
+
+                #cpu_usage = p.cpu_percent(interval=1)
+                #memory_usage = p.memory_info().rss
+                #print(f"CPU Usage: {cpu_usage}%, Memory Usage: {memory_usage} bytes = cores ", os.cpu_count())
+
                 frame_start_time = time.time()
                 cur_data_from_queue = self.edge_queue.get()
 
@@ -1302,9 +1409,10 @@ class EdgeFrontEnd(WinFrontEnd):
                     #ALIKE
                     #pred = self.testManager.feature_model.run(curr_frame.color)
                     #XFeat
-                    pred = xfeat.detectAndCompute(curr_frame.color)[0]
+                    pred = self.feature_manager.detectAndCompute(curr_frame.color)
                     keypoints = pred['keypoints'].cpu().numpy()
                     curr_frame.descriptors = pred['descriptors'].cpu().numpy()
+
                     del pred
 
                 #curr_frame.inliers = np.zeros((keypoints.shape[0], 1), dtype=np.bool)
@@ -1403,6 +1511,7 @@ class EdgeFrontEnd(WinFrontEnd):
                     tmp_last_kf_idx,
                     curr_visibility,
                     self.occ_aware_visibility,
+                    device = device
                 )
                 if len(self.current_window) < self.window_size:
                     union = torch.logical_or(
@@ -1439,6 +1548,9 @@ class EdgeFrontEnd(WinFrontEnd):
                         init=False,
                     )
 
+                    #curr_frame.pr_desc = self.get_pr_descriptor(viewpoint.original_image, )
+                    self.keyframes[kf_id] = curr_frame
+
                     self.request_keyframe(
                         device, viewpoint, self.current_window, depth_map
                     )
@@ -1471,7 +1583,7 @@ class EdgeFrontEnd(WinFrontEnd):
                     time.sleep(max(0.01, 1.0 / 3.0 - duration / 1000))
             else:
                 data = self.frontend_queue.get()
-
+                #print('frontend::queue', self.frontend_queue.qsize())
                 if data[0] == "sync_backend":
                     self.sync_backend(data, )#prev_frame_idx=prev_frame_idx)
 
@@ -1496,10 +1608,16 @@ class EdgeFrontEnd(WinFrontEnd):
         last_keyframe_idx,
         cur_frame_visibility_filter,
         occ_aware_visibility,
+        device = None
     ):
         kf_translation = self.config["Training"]["kf_translation"]
         kf_min_translation = self.config["Training"]["kf_min_translation"]
         kf_overlap = self.config["Training"]["kf_overlap"]
+
+        if device is not None:
+            median_depth = device.median_depth
+        else:
+            median_depth = self.median_depth
 
         curr_frame = self.cameras[cur_frame_idx]
         last_kf = self.cameras[last_keyframe_idx]
@@ -1507,8 +1625,8 @@ class EdgeFrontEnd(WinFrontEnd):
         last_kf_CW = getWorld2View2(last_kf.R, last_kf.T)
         last_kf_WC = torch.linalg.inv(last_kf_CW)
         dist = torch.norm((pose_CW @ last_kf_WC)[0:3, 3])
-        dist_check = dist > kf_translation * self.median_depth
-        dist_check2 = dist > kf_min_translation * self.median_depth
+        dist_check = dist > kf_translation * median_depth
+        dist_check2 = dist > kf_min_translation * median_depth
 
         union = torch.logical_or(
             cur_frame_visibility_filter, occ_aware_visibility[last_keyframe_idx]

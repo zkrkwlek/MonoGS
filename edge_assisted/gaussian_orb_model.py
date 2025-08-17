@@ -286,8 +286,7 @@ class GaussianOrbModel(GaussianModel):
 
             new_obs = torch.full((N1, 2), -1.0, device="cuda")
             new_obs[temp_index] = keypoints[match_index[temp_index]]
-
-            print('new gaussian feature test', torch.count_nonzero(new_obs > -1), fused_point_cloud.shape, temp_points.shape, torch.count_nonzero(temp_index), match_index.shape, unmatch_mask.shape, temp_keypoints.shape)
+            #print('new gaussian feature test', torch.count_nonzero(new_obs > -1), fused_point_cloud.shape, temp_points.shape, torch.count_nonzero(temp_index), match_index.shape, unmatch_mask.shape, temp_keypoints.shape)
         else:
             new_isfeature = torch.zeros(N1, device='cuda')
             new_obs = torch.full((N1, 2), -1.0, device="cuda")

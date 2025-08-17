@@ -35,6 +35,7 @@ class EdgeFrame:
 
         self.keypoints = None # np 수정 안함.-> gpu
         self.descriptors = None #np 수정 안함.
+        self.pr_desc = None #np or cuda
 
         #self.gaussianpoints = None #torch, cpu로 내려야 하나? 이것만 수정함. 이걸 통신하자. # 이게 prune 후 frontend로 갈 때 prev, 아직 갱신 안된 키프레임도 처리되어야 함
         #self.gaussians = None

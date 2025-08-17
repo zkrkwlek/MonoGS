@@ -6,7 +6,7 @@ import cv2
 import torch
 
 class Device:
-    def __init__(self, src, K, D, w, h):
+    def __init__(self, src, K, D, w, h, bMapper = True, color = [1,0,0]):
 
         self.src = src
         self.id = None
@@ -14,6 +14,7 @@ class Device:
         self.D = D
         self.w = w
         self.h = h
+        self.mapper = bMapper #True이면 맵 초기화, False이면 만들어진 맵으로 트래킹
 
         self.fx = self.K[0][0]
         self.fy = self.K[1][1]
@@ -39,6 +40,8 @@ class Device:
 
         self.has_depth = True
         self.depth_scale = 1.0
+
+        self.color = color
 
         projection_matrix = getProjectionMatrix2(
             znear=0.01,

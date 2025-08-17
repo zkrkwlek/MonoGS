@@ -6,6 +6,8 @@ import requests
 import cv2
 from socket import *
 import argparse
+import gzip
+import psutil
 
 import os
 #os.environ['TORCH_USE_CUDA_DSA'] = "1"
@@ -82,8 +84,9 @@ def DeviceConnect(id, src):
                   [0, fy, cy],
                   [0, 0, 1]], dtype=np.float32)
     D = cam_data[6:11]
-    slam.AddDevice(src, K, D, w, h)
-    #print('device', src, id, cam_data)
+    bMapper = bool(cam_data[18])
+    slam.AddDevice(src, K, D, w, h, bMapper)
+    print('device', src, id, cam_data, bMapper)
 
 def yolosegc(id, src):
     res = sess.post(FACADE_SERVER_ADDR + "/Download?keyword=" + "yolosegc" + "&id=" + str(id) + "&src=" + src,"")
@@ -109,6 +112,13 @@ def yolosegc(id, src):
         if idx == n_array:
             break
     slam.AddContours(id, contours,src=src.split('.')[0])
+
+def ressalad(id,src):
+    res = sess.post(
+        FACADE_SERVER_ADDR + "/Download?keyword=" + "ressalad" + "&id=" + str(id) + "&src=" + src, "")
+    bdata = gzip.decompress(res.content)
+    pr_desc = np.frombuffer(bdata, dtype=np.float32)
+    slam.AddPlaceRecogDesc(id, pr_desc, src=src)
 
 def resdepthanything(id,src):
 
@@ -143,7 +153,15 @@ def resdepthanything(id,src):
 
                 frame = slam.AddFrame(fid, image, R, t, depth=depth, src=src)
                 # slam.SetDepth(id, depth)
-                slam.edge_queue.put([src, id])
+
+                device = slam.devices[src]
+
+                sess.post(FACADE_SERVER_ADDR + "/Upload?keyword=reqsalad&id=" + str(id) + "&src=" + src,"")
+
+                if device.mapper:
+                    slam.edge_queue.put([src, id])
+                #else:
+                #    slam.Alignment(src, id)
 
                 # ss = time.time()
                 # list<cv2.Keypoint?>, numpy.ndarray
@@ -262,6 +280,10 @@ def udpthread():
         src = data['src']
         keyword = data['keyword']
 
+        #cpu_usage = p.cpu_percent(interval=1)
+        #memory_usage = p.memory_info().rss
+        #print(f"Server = CPU Usage: {cpu_usage}%, Memory Usage: {memory_usage} bytes = cores ", os.cpu_count())
+
         if keyword in globals():
             globals()[keyword](id,src)
         #predict(message)
@@ -285,13 +307,13 @@ if __name__ == '__main__':
     ##','으로 연결하여 다중 키워드 등록
     ##ex)'image,segmentation'
     parser.add_argument(
-        '--RKeywords', type=str,default='ObjectMapCreation,ObjectMapUpdate,resdepthanything,yolosegc,DeviceConnect',
+        '--RKeywords', type=str,default='ObjectMapCreation,ObjectMapUpdate,resdepthanything,yolosegc,DeviceConnect,ressalad',
         help='Received keyword lists')
     ##서버에서 생성한 데이터를 등록하는 키워드
     ##유니크 키워드 생성 필요
     ##다른 서버 또는 기기에서 해당 데이터 이용 가능
     parser.add_argument(
-        '--SKeywords', type=str,default='resobjrecon',
+        '--SKeywords', type=str,default='resobjrecon,reqsalad',
         help='Sendeded keyword lists')
     ##전송받는 데이터의 타입 설정.
     parser.add_argument(
@@ -358,8 +380,14 @@ if __name__ == '__main__':
     bPoseUpdate = True
     slam = EdgeGSSLAM(config, tracking_mode=bTrack, mapping_update_pose = bPoseUpdate)
 
+    p = psutil.Process()
+
+    #cpu_usage = p.cpu_percent(interval=1)
+    #memory_usage = p.memory_info().rss
+    #print(f"Server = CPU Usage: {cpu_usage}%, Memory Usage: {memory_usage} bytes = cores ", os.cpu_count())
+
     ##test
-    orb_extractor = ORBExtractor()
+    #orb_extractor = ORBExtractor()
 
     """
     projection_matrix = getProjectionMatrix2(
