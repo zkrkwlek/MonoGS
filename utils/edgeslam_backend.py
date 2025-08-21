@@ -33,6 +33,7 @@ from edge_assisted.device_utils import ConvertFramdId
 
 from collections import defaultdict
 import psutil
+import cProfile
 
 #alike + lightglue
 #import sys
@@ -73,7 +74,7 @@ class EdgeBackEnd(WinBackEnd):
         self.devices = None
 
 
-    def push_to_frontend(self, src, tag=None, first_id = None, prune = None, local_window = None):
+    def push_to_frontend(self, tag=None, first_id = None, prune = None, local_window = None, src = None):
 
         a = time.time()
 
@@ -96,7 +97,7 @@ class EdgeBackEnd(WinBackEnd):
         if prune is not None:
             prune_data = prune.cpu()
             #print("push_to_frontend::end", self.gaussians.get_xyz.shape)
-        msg = [tag, src, move_gaussianmodel_to_cpu(self.gaussians), move_occ_visibility_to_cpu(self.occ_aware_visibility), (keyframes), (prune_data)]
+        msg = [tag, move_gaussianmodel_to_cpu(self.gaussians), move_occ_visibility_to_cpu(self.occ_aware_visibility), (keyframes), (prune_data), src]
         self.frontend_queue.put(msg)
         c = time.time()
         #print('backend::sync', b-a, c-b)
@@ -602,13 +603,15 @@ class EdgeBackEnd(WinBackEnd):
             ##update pose
             if bPoseUpdate:
                 tau = torch.cat([viewpoint.cam_trans_delta, viewpoint.cam_rot_delta], axis=0)
-                T_w2c = torch.eye(4, device=viewpoint.R.device)
+                T_w2c = torch.zeros(4,4, device=viewpoint.R.device)
                 T_w2c[0:3, 0:3] = viewpoint.R
                 T_w2c[0:3, 3] = viewpoint.T
+                T_w2c[3, 3] = 1
                 new_w2c = SE3_exp(tau) @ T_w2c
 
                 R = new_w2c[0:3, 0:3]
                 t = new_w2c[0:3, 3]
+
             else:
                 R = viewpoint.R
                 t = viewpoint.T
@@ -1233,7 +1236,7 @@ class EdgeBackEnd(WinBackEnd):
         viewpoint_stack = [self.viewpoints[kf_idx] for kf_idx in current_window]
         random_viewpoint_stack = [] #kf_idx를 저장
         frames_to_optimize = self.config["Training"]["pose_window"]
-        #frames_to_optimize = len(current_window)
+        frames_to_optimize = len(current_window)
 
         sorted_kf_ids = [self.frames[kf_idx].kf_id for kf_idx in current_window]
 
@@ -1352,7 +1355,7 @@ class EdgeBackEnd(WinBackEnd):
                 loss_ba = self.bundle_adjustment(current_window, bPoseUpdate= False)
                 loss_mapping += loss_ba * self.weight_ba
             else:
-                loss_ba = self.bundle_adjustment(extension_graph, bPoseUpdate=False)
+                loss_ba = self.bundle_adjustment(extension_graph, bPoseUpdate=True)
                 loss_mapping += loss_ba * self.weight_ba
             """
             if graph is not None:
@@ -2089,9 +2092,9 @@ class EdgeBackEnd(WinBackEnd):
                 self.update_occ_visibility(self.current_window)
 
                 if prune_mask is not None:
-                    self.push_to_frontend(src, prune=prune_mask, local_window=local_kf_window)
+                    self.push_to_frontend(prune=prune_mask, local_window=local_kf_window)
                 else:
-                    self.push_to_frontend(src, local_window=local_kf_window)
+                    self.push_to_frontend(local_window=local_kf_window)
                 e = time.time()
                 # print("backend = mapping with empty queue", (e-s))
 
@@ -2343,7 +2346,8 @@ class EdgeBackEnd(WinBackEnd):
 
     def run_with_ba(self):
         prune_dict = None
-        p = psutil.Process()
+
+        profiler = cProfile.Profile()
 
         # test
         new_gaussians = GaussianOrbModel(self.gaussians.max_sh_degree, self.gaussians.config)
@@ -2394,11 +2398,10 @@ class EdgeBackEnd(WinBackEnd):
                     if prune_mask2 is not None:
                         prune_mask = prune_mask2
 
-                    src = 'gs_test_0'
                     if prune_mask is not None:
-                        self.push_to_frontend(src, prune=prune_mask)
+                        self.push_to_frontend(prune=prune_mask)
                     else:
-                        self.push_to_frontend(src, )
+                        self.push_to_frontend()
                     e = time.time()
 
                 #print("backend = mapping with empty queue", (e-s), self.gaussians.get_xyz.shape[0])
@@ -2420,6 +2423,7 @@ class EdgeBackEnd(WinBackEnd):
                 elif data[0] == "sync":
                     pass
                 elif data[0] == "init":
+                    profiler.enable()
                     src = data[1]
                     cur_frame_idx = data[2]
                     viewpoint = data[3]
@@ -2466,7 +2470,7 @@ class EdgeBackEnd(WinBackEnd):
 
                     self.initialize_map_with_ba(tmp_id, viewpoint)
                     extension_window = [tmp_id]
-                    self.push_to_frontend(src,"init", first_id=tmp_id)
+                    self.push_to_frontend("init", first_id=tmp_id)
                     ##test image save
                     #feature and gaussian
                     image_np = (
@@ -2496,9 +2500,11 @@ class EdgeBackEnd(WinBackEnd):
                         cv2.circle(out, p1, 2, (0, 255, 0), 1, lineType=16)
 
                     cv2.imwrite('./res/test_ba/' + tmp_id+ '.jpg', out)
-
+                    profiler.disable()
+                    #profiler.print_stats(sort='tottime') #tottime, cumtime, percall
 
                 elif data[0] == "keyframe":
+                    profiler.enable()
                     s = time.time()
                     src = data[1]
                     cur_frame_idx = data[2]
@@ -2722,6 +2728,7 @@ class EdgeBackEnd(WinBackEnd):
                     #print('window test',self.current_window)
                     opt_params = []
                     frames_to_optimize = self.config["Training"]["pose_window"]
+                    frames_to_optimize = len(current_window)
                     iter_per_kf = self.mapping_itr_num if self.single_thread else 10
                     if not self.initialized:
                         if (
@@ -2736,7 +2743,7 @@ class EdgeBackEnd(WinBackEnd):
                         else:
                             iter_per_kf = self.mapping_itr_num
                     #윈도우 내의 뷰포인트에 접근해서 최근 뷰포인트는 포즈까지 추가. 나머지는 exposure만 추가
-                    for idx, kf_idx in enumerate(self.current_window):
+                    for idx, kf_idx in enumerate(extension_window): #self.current_window
                         if kf_idx == self.first_kf_id:
                             continue
                         viewpoint = self.viewpoints[kf_idx]
@@ -2786,9 +2793,9 @@ class EdgeBackEnd(WinBackEnd):
                     self.update_occ_visibility(self.current_window)
 
                     if remove_ids is not None:
-                        self.push_to_frontend(src, "keyframe", prune=remove_ids)
+                        self.push_to_frontend( "keyframe", prune=remove_ids, src = src)
                     else:
-                        self.push_to_frontend(src, "keyframe")
+                        self.push_to_frontend( "keyframe", src = src)
                     e2 = time.time()
                     print('backend::end', tmp_id, e2 - s, self.gaussians.get_xyz.shape[0], )
 
@@ -2851,6 +2858,8 @@ class EdgeBackEnd(WinBackEnd):
                                                                    filename='./res/test_ba/mapping_' + str(
                                                                        cur_frame_idx) + '_' + str(kf_idx) + '.jpg')
                             """
+                    profiler.disable()
+                    #profiler.print_stats(sort='tottime')
                 else:
                     raise Exception("Unprocessed data", data)
                 gc.collect()
