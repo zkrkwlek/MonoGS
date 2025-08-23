@@ -105,7 +105,12 @@ class Camera(nn.Module):
 
     @property
     def camera_center(self):
-        return self.world_view_transform.inverse()[3, :3]
+        val = -self.R.t()@self.T.unsqueeze(1)
+        #print(val, val.shape)
+        return val.squeeze().float()
+        #val = self.world_view_transform.inverse()[3, :3]
+        #print(val.dtype, val.shape, val)
+        #return self.world_view_transform.inverse()[3, :3]
 
     def update_RT(self, R, t):
         self.R = R.to(device=self.device)

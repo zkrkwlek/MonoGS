@@ -123,7 +123,16 @@ def ressalad(id,src):
 def resdepthanything(id,src):
 
     #if not slam.CheckFrame(id):
-        #print("resdepthanything", id)
+        res_depth = sess.post(
+            FACADE_SERVER_ADDR + "/Download?keyword=" + "resdepthanything" + "&id=" + str(id) + "&src=" + src,
+            "")
+        depth_array = np.frombuffer(res_depth.content, dtype=np.uint8)
+        depth = cv2.imdecode(depth_array, cv2.IMREAD_UNCHANGED)
+        depth = depth.astype(np.float64) / 1000.0
+
+        slam.AddDepth(src, id, depth)
+        print('res depth', src, id)
+        return
         try:
             res_pose = sess.post(
                 FACADE_SERVER_ADDR + "/Download?keyword=" + "FrameUpdate" + "&id=" + str(id) + "&src=" + src, "")
@@ -194,6 +203,31 @@ def resdepthanything(id,src):
         cv2.waitKey(1)
         """
 
+def FrameUpdate(id, src):
+
+    res_pose = sess.post(FACADE_SERVER_ADDR + "/Download?keyword=" + "FrameUpdate" + "&id=" + str(id) + "&src=" + src, "")
+    array = np.frombuffer(res_pose.content, dtype=np.float32)
+    fid = int(array[1])
+
+    res_rgb = sess.post(FACADE_SERVER_ADDR + "/Download?keyword=" + datatype + "&id=" + str(id) + "&src=" + src, "")
+    img_array = np.frombuffer(res_rgb.content, dtype=np.uint8)
+    img_cv = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+
+    if img_cv is not None:
+        #t = array[6:9]
+        #R = array[9:18].reshape(3, 3)
+        #print('frame',src, id, R,t)
+        image = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
+
+        frame = slam.AddFrame(fid, image, None, None, depth=None, src=src)
+
+        device = slam.devices[src]
+
+        if device.mapper:
+            slam.edge_queue.put([src, id])
+        else:
+            slam.Alignment(src, id)
+
 def ObjectMapCreation(id,src):
     res = sess.post(FACADE_SERVER_ADDR + "/Download?keyword=" + "ObjectMapCreation" + "&id=" + str(id) + "&src=" + src,"")
     array = np.frombuffer(res.content, dtype=np.float32)
@@ -204,7 +238,7 @@ def ObjectMapCreation(id,src):
     #slam.AddObject(oid,R,t)
 
     #slam.backend.ObjectMapInitialization()
-
+ 
 def ObjectMapUpdate(id,src):
     #print("ObjectMapUpdate")
     """
@@ -307,13 +341,13 @@ if __name__ == '__main__':
     ##','으로 연결하여 다중 키워드 등록
     ##ex)'image,segmentation'
     parser.add_argument(
-        '--RKeywords', type=str,default='ObjectMapCreation,ObjectMapUpdate,resdepthanything,yolosegc,DeviceConnect,ressalad',
+        '--RKeywords', type=str,default='FrameUpdate,ObjectMapCreation,ObjectMapUpdate,resdepthanything,yolosegc,DeviceConnect,ressalad',
         help='Received keyword lists')
     ##서버에서 생성한 데이터를 등록하는 키워드
     ##유니크 키워드 생성 필요
     ##다른 서버 또는 기기에서 해당 데이터 이용 가능
     parser.add_argument(
-        '--SKeywords', type=str,default='resobjrecon,reqsalad',
+        '--SKeywords', type=str,default='requnidepth,resobjrecon,reqsalad',
         help='Sendeded keyword lists')
     ##전송받는 데이터의 타입 설정.
     parser.add_argument(

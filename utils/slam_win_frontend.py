@@ -50,6 +50,7 @@ class WinFrontEnd(FrontEnd):
             self.cameras[kf_id].update_RT(kf_R.clone().to(self.device), kf_T.clone().to(self.device))
 
     def tracking(self, cur_frame_idx, viewpoint):
+        a = time.time()
         prev = self.cameras[cur_frame_idx - self.use_every_n_frames]
         viewpoint.update_RT(prev.R, prev.T)
 
@@ -85,12 +86,16 @@ class WinFrontEnd(FrontEnd):
 
         pose_optimizer = torch.optim.Adam(opt_params)
 
-        for tracking_itr in range(self.tracking_itr_num):
+        t1 = 0.0
+        t2 = 0.0
 
+        for tracking_itr in range(self.tracking_itr_num):
+            t = time.time()
             render_pkg = render(
                 viewpoint, self.gaussians, self.pipeline_params, self.background
             )
-
+            ta = time.time()
+            t1+=(ta-t)
             image, depth, opacity = (
                 render_pkg["render"],
                 render_pkg["depth"],
@@ -100,8 +105,10 @@ class WinFrontEnd(FrontEnd):
             loss_tracking = get_loss_tracking(
                 self.config, image, depth, opacity, viewpoint
             )
+            t = time.time()
             loss_tracking.backward()
-
+            tb = time.time()
+            t2+=(tb-t)
             with torch.no_grad():
                 pose_optimizer.step()
                 converged = update_pose(viewpoint)
@@ -124,7 +131,8 @@ class WinFrontEnd(FrontEnd):
                 break
 
         self.median_depth = get_median_depth(depth, opacity)
-
+        b = time.time()
+        print("tracking time = ", b-a, t1, t2)
         return render_pkg
 
     def run(self):

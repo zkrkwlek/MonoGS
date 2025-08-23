@@ -42,9 +42,9 @@ def get_loss_gaussian(config, image, viewpoint, projection):
     
     return error
 
-def get_loss_tracking(config, image, depth, opacity, viewpoint, initialization=False, feature_mask = None):
+def get_loss_tracking(config, image, depth, opacity, viewpoint, initialization=False, monocular = True, feature_mask = None):
     image_ab = (torch.exp(viewpoint.exposure_a)) * image + viewpoint.exposure_b
-    if config["Training"]["monocular"]:
+    if monocular:
         return get_loss_tracking_rgb(config, image_ab, depth, opacity, viewpoint, feature_mask = feature_mask)
     return get_loss_tracking_rgbd(config, image_ab, depth, opacity, viewpoint, feature_mask = feature_mask)
 

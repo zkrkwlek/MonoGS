@@ -1,12 +1,14 @@
 from utils.camera_utils import Camera
 from gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, focal2fov
 import pycolmap
+import gtsam
 import numpy as np
 import cv2
 import torch
+import atomics
 
 class Device:
-    def __init__(self, src, K, D, w, h, bMapper = True, color = [1,0,0]):
+    def __init__(self, src, K, D, w, h, bMapper = True, color = [1,0,0], monocular = True):
 
         self.src = src
         self.id = None
@@ -14,6 +16,7 @@ class Device:
         self.D = D
         self.w = w
         self.h = h
+        self.monocular = monocular
         self.mapper = bMapper #True이면 맵 초기화, False이면 만들어진 맵으로 트래킹
 
         self.fx = self.K[0][0]
@@ -46,14 +49,15 @@ class Device:
         projection_matrix = getProjectionMatrix2(
             znear=0.01,
             zfar=100.0,
-            fx=K[0][0],
-            fy=K[1][1],
-            cx=K[0][2],
-            cy=K[1][2],
+            fx=self.fx,
+            fy=self.fy,
+            cx=self.cx,
+            cy=self.cy,
             W=self.w,
             H=self.h
         ).transpose(0, 1)
         self.projection_matrix = projection_matrix.to(device='cuda')
+        self.K_gtsam = gtsam.Cal3_S2(self.fx, self.fy, 0.0, self.cx, self.cy)
 
         self.gaussians = None
         self.frame_ids = []   #int or long
@@ -95,6 +99,14 @@ class Device:
         col_param.ransac.confidence = 0.99
         self.col_param = col_param
 
+        self.used = atomics.atomic(width=4, atype=atomics.INT, init = 0)
+
+    def set_used(self, val = 0):
+        self.used.store(val)
+
+    def is_used(self):
+        return bool(self.used.load())
+
     def convert_viewpoint(self, idx):
 
         frame = self.frames[idx]
@@ -105,8 +117,9 @@ class Device:
 
         if self.distorted:
             image = cv2.remap(image, self.map1x, self.map1y, cv2.INTER_LINEAR)
-        if frame.depth is not None:
-            depth = cv2.remap(depth, self.map1x, self.map1y, cv2.INTER_LINEAR)
+
+            if frame.depth is not None:
+                depth = cv2.remap(depth, self.map1x, self.map1y, cv2.INTER_LINEAR)
 
         image = (
             torch.from_numpy(image / 255.0)
@@ -132,6 +145,13 @@ class Device:
             self.w,
             device='cuda',
         )
+
+    def convert_depth(self, idx):
+        frame = self.frames[idx]
+        depth = frame.depth
+        if self.distorted and frame.depth is not None:
+            depth = cv2.remap(depth, self.map1x, self.map1y, cv2.INTER_LINEAR)
+        return depth
 
     def is_distorted(self, D, tol=1e-6):
         """

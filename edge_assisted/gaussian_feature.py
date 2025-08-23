@@ -271,24 +271,23 @@ def projection(_X, R, t, fx, fy, cx, cy, w, h):
 
 
 def project_pc_to_pixel(points, R, t, fx, fy, cx, cy, w, h):
-    T = torch.eye(4, device=R.device, dtype=torch.float32)
+    T = torch.zeros(4,4, device=R.device, dtype=torch.float32)
     T[:3, :3] = R
     T[:3, 3] = t
-
-    K = torch.tensor([
-        [fx, 0.0, cx],
-        [0.0, fy, cy],
-        [0.0, 0.0, 1.0]
-    ], dtype=torch.float32, device=R.device)
+    T[3,3] = 1
 
     N = points.size()[0]
     points_h = torch.cat([points, torch.ones(N, 1,device=R.device)], dim=1)  # (N,4)
     points_h = points_h.float()
     # 변환 행렬 적용
     points_cam = points_h @ T.T  # (N,4)
+    #points_cam = T @ points_h.T
+    #points_cam = points_cam.T
+    #print(points_cam[:, 3:4])
 
     # 카메라 좌표계로 변환 (동차 좌표 마지막 차원으로 나눔)
-    points_cam = points_cam[:, :3] / points_cam[:, 3:4]  # (N,3)
+    #points_cam = points_cam[:, :3] / points_cam[:, 3:4]  # (N,3)
+    points_cam = points_cam[:,:3]
 
     #mask = points[:, 2] > 0
     #pointsa = points_cam[mask]

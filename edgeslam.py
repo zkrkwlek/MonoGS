@@ -21,6 +21,9 @@ from edge_assisted.device_utils import Device
 from edge_assisted.object_manager import Object, ObjectManager
 
 from edge_assisted.feature_manager import FeatureManager
+from edge_assisted.pose_optimizer2 import PnPOptimizer
+
+import yappi
 
 class EdgeGSSLAM(SLAM_WIN):
     def __init__(self, config, tracking_mode=False, mapping_update_pose = False, save_dir=None):
@@ -89,6 +92,11 @@ class EdgeGSSLAM(SLAM_WIN):
         self.frontend.feature_manager = XFeat
         self.backend.feature_manager = XFeat
 
+        #gtsam
+        PoseOptimizer = PnPOptimizer()
+        self.frontend.pose_optimizer = PoseOptimizer
+        self.backend.pose_optimizer = PoseOptimizer
+
         frontend_queue = Queue()
         backend_queue = Queue()
         self.edge_queue = PeekableQueue()
@@ -128,6 +136,7 @@ class EdgeGSSLAM(SLAM_WIN):
         self.object_manager = ObjectManager()
         self.backend.objects = self.object_manager
 
+        #device 정보
         self.devices={}
         self.backend.devices  = self.devices
         self.frontend.devices = self.devices
@@ -141,6 +150,13 @@ class EdgeGSSLAM(SLAM_WIN):
         p = threading.Thread(target = self.frontend.coordinate_alignment, args=(device, idx))
         p.start()
 
+    def AddDepth(self, src, idx, depth):
+        device = self.devices[src]
+        f = device.frames[idx]
+        f.depth = depth
+        p = threading.Thread(target=self.frontend.after_depth, args=(device, idx))
+        p.start()
+
     def AddFrame(self, fid, img, R, t, depth = None, src = None):
         device = self.devices[src]
         if fid in device.frames:
@@ -150,7 +166,7 @@ class EdgeGSSLAM(SLAM_WIN):
             f.depth = depth
             f.UpdatePose(R,t)
         else:
-            f = EdgeFrame(fid, img, R, t, depth=depth, src=src)
+            f = EdgeFrame(fid, img, None, None, depth=depth, src=src)
             device.frames[fid] = f
             #self.dataset[fid] = f
         return f
@@ -162,8 +178,7 @@ class EdgeGSSLAM(SLAM_WIN):
         else:
             f = EdgeFrame(fid, None, None, None, src=src)
             device.frames[fid] = f
-
-        f.pr_desc = torch.from_numpy(desc).unsqueeze(0)
+        f.pr_desc = torch.from_numpy(desc.copy()).unsqueeze(0)
         if device.poses is None and not device.mapper:
             #self.frontend.relocalization(device, fid)
             p = threading.Thread(target=self.frontend.relocalization, args=(device, fid))

@@ -25,11 +25,15 @@ class EdgeFrame:
         self.contours = []
         self.contours_mask = None
 
+        self.tag = None
+
         ##T는 지금은 이용 안함.
-        self.T = np.zeros((4, 4), dtype=np.float64)
-        self.T[:3, :3] = R
+        if R is None:
+            R = np.eye(3,dtype = np.float32)
         if t is None:
-            t = np.zeros((3,1),dtype=np.float64)
+            t = np.zeros((3,1),dtype=np.float32)
+        self.T = np.zeros((4, 4), dtype=np.float32)
+        self.T[:3, :3] = R
         self.T[:3, 3] = t.flatten()  # 또는 M[:3, 3] = b.squeeze()
         self.T[3, 3] = 1.0
 

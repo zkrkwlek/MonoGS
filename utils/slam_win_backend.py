@@ -85,6 +85,7 @@ class WinBackEnd(BackEnd):
                     self.push_to_frontend("init")
 
                 elif data[0] == "keyframe":
+                    a = time.time()
                     cur_frame_idx = data[1]
                     viewpoint = data[2]
                     current_window = data[3]
@@ -153,6 +154,8 @@ class WinBackEnd(BackEnd):
                     self.map(self.current_window, iters=iter_per_kf)
                     self.map(self.current_window, prune=True)
                     self.push_to_frontend("keyframe")
+                    b = time.time()
+                    print('mapping', b-a)
                 else:
                     raise Exception("Unprocessed data", data)
         while not self.backend_queue.empty():

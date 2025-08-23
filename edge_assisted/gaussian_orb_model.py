@@ -51,6 +51,7 @@ class GaussianOrbModel(GaussianModel):
         new_gaussians._scaling = self._scaling[indices]
         new_gaussians._rotation = self._rotation[indices]
         new_gaussians._opacity = self._opacity[indices]
+        new_gaussians.unique_gaussian_ids = self.unique_gaussian_ids[indices]
 
         return new_gaussians
     """

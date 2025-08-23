@@ -663,7 +663,7 @@ class SLAM_GUI:
         self.render_gui()
 
     def _update_thread(self):
-        interval = 0.033 #0.01
+        interval = 0.1 #0.01
         while True:
             time.sleep(0.5)
             self.step += 1
