@@ -131,7 +131,7 @@ def resdepthanything(id,src):
         depth = depth.astype(np.float64) / 1000.0
 
         slam.AddDepth(src, id, depth)
-        print('res depth', src, id)
+        #print('res depth', src, id)
         return
         try:
             res_pose = sess.post(

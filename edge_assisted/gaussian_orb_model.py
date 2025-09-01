@@ -23,7 +23,7 @@ from gaussian_splatting.utils.general_utils import (
 from gaussian_splatting.utils.graphics_utils import BasicPointCloud, getWorld2View2
 from gaussian_splatting.utils.sh_utils import RGB2SH
 
-from edge_assisted.gaussian_feature import calculate_keypoint_mask,calculate_feature_mask,calculate_bbox_mask, project_pc_to_pixel, visualize_pc,convert_xyz, pixels_to_pc,find_correspondence
+from edge_assisted.gaussian_feature import calculate_keypoint_mask,calculate_feature_mask,calculate_bbox_mask, project_pc_to_pixel, visualize_pc,convert_xyz, unproject_pixel_to_pc,find_correspondence
 from edge_assisted.gaussian_feature import GaussianPointManager
 
 ###일단 densification 같은 것에 대응하는지 확인
@@ -508,8 +508,7 @@ class GaussianOrbModel(GaussianModel):
             torch.max(self.get_scaling, dim=1).values
             > self.percent_dense * scene_extent,
         )
-        #selected_pts_mask = torch.logical_and(
-        #    selected_pts_mask, ~self.isfeatured)
+        selected_pts_mask = torch.logical_and(selected_pts_mask, ~self.isfeatured)
 
         stds = self.get_scaling[selected_pts_mask].repeat(N, 1)
         means = torch.zeros((stds.size(0), 3), device="cuda")
@@ -575,8 +574,7 @@ class GaussianOrbModel(GaussianModel):
             torch.max(self.get_scaling, dim=1).values
             <= self.percent_dense * scene_extent,
         )
-        #selected_pts_mask = torch.logical_and(
-        #    selected_pts_mask,~self.isfeatured)
+        selected_pts_mask = torch.logical_and(selected_pts_mask,~self.isfeatured)
 
         new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
@@ -624,19 +622,20 @@ class GaussianOrbModel(GaussianModel):
         split_ids =self.densify_and_split(grads, max_grad, extent)
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
-        p_opa1 = torch.count_nonzero(prune_mask).item()
-        p_opa2 = torch.count_nonzero(prune_mask & self.isfeatured).item()
-        p_vs = 0
-        p_ws = 0
+        prune_mask = torch.logical_and(prune_mask, torch.logical_not(self.isfeatured))
+        #p_opa1 = torch.count_nonzero(prune_mask).item()
+        #p_opa2 = torch.count_nonzero(prune_mask & self.isfeatured).item()
+        #p_vs = 0
+        #p_ws = 0
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
-            p_vs = torch.count_nonzero(big_points_vs & self.isfeatured).item()
-            p_ws = torch.count_nonzero(big_points_ws & self.isfeatured).item()
+            #p_vs = torch.count_nonzero(big_points_vs & self.isfeatured).item()
+            #p_ws = torch.count_nonzero(big_points_ws & self.isfeatured).item()
             prune_mask = torch.logical_or(
                 torch.logical_or(prune_mask, big_points_vs), big_points_ws
             )
-        print('prune_points', self.get_xyz.shape[0], torch.count_nonzero(prune_mask).item(), torch.count_nonzero(prune_mask & (self.isfeatured)).item(), '=', p_opa1, p_opa2, p_vs, p_ws)
+        #print('prune_points', self.get_xyz.shape[0], torch.count_nonzero(prune_mask).item(), torch.count_nonzero(prune_mask & (self.isfeatured)).item(), '=', p_opa1, p_opa2, p_vs, p_ws)
         ## remove gaussian ids
         removed_ids = self.unique_gaussian_ids[prune_mask]
         removed_ids = torch.cat((split_ids, removed_ids), axis = 0)

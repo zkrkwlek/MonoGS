@@ -22,11 +22,12 @@ from edge_assisted.object_manager import Object, ObjectManager
 
 from edge_assisted.feature_manager import FeatureManager
 from edge_assisted.pose_optimizer2 import PnPOptimizer
+from edge_assisted.place_recognizer import PlaceRecognizer
 
 import yappi
 
 class EdgeGSSLAM(SLAM_WIN):
-    def __init__(self, config, tracking_mode=False, mapping_update_pose = False, save_dir=None):
+    def __init__(self, config, tracking_mode=False, mapping_update_pose = False, gs_pose = False, save_dir=None):
         super().__init__(config, save_dir)
 
         start = torch.cuda.Event(enable_timing=True)
@@ -82,6 +83,9 @@ class EdgeGSSLAM(SLAM_WIN):
         self.frontend = EdgeFrontEnd(self.config)
         self.backend = EdgeBackEnd(self.config)
 
+        self.frontend.gs_pose = gs_pose
+        self.backend.gs_pose = gs_pose
+
         #안쓰임
         FeatureManagerA = GaussianPointManager()
         self.frontend.testManager = FeatureManagerA
@@ -96,6 +100,11 @@ class EdgeGSSLAM(SLAM_WIN):
         PoseOptimizer = PnPOptimizer()
         self.frontend.pose_optimizer = PoseOptimizer
         self.backend.pose_optimizer = PoseOptimizer
+
+        #salad
+        _PlaceRecognizer = PlaceRecognizer()
+        self.frontend.place_recognizer = _PlaceRecognizer
+        self.backend.place_recognizer = _PlaceRecognizer
 
         frontend_queue = Queue()
         backend_queue = Queue()

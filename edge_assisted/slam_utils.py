@@ -6,13 +6,35 @@ def get_patch_loss(patch, gt_patch):
 def get_reprojection_loss2(gaussians, keypoints):
     return gaussians-keypoints
 
-def get_reprojection_loss(gaussians, keypoints, weight = 0.05):
+def get_reprojection_loss(gaussians, keypoints):
     # 휴버 로스 추가
     #l1 = keypoints-gaussians
-    l1 = torch.abs(gaussians-keypoints)
-    #l2 = torch.sum((gaussians - keypoints) ** 2, dim=1)
+    #loss = torch.abs(gaussians-keypoints)
+    l2_dist = torch.sum((gaussians - keypoints) ** 2, dim=1)
+    #l1_dist = torch.sqrt(l2_dist + 1e-8)
+    #condition = l1_dist < 1.0
+    #loss = torch.where(condition, 0.5 * l2_dist, l1_dist - 0.5)
     #print(l1, l1.mean())
-    return l1#l1.mean()*weight
+    return l2_dist
+
+
+def get_reprojection_loss_huber(projected_points, observed_keypoints, delta=3.0):
+    """
+    Huber loss를 사용한 reprojection loss (outlier에 더 robust)
+    """
+    assert projected_points.shape == observed_keypoints.shape
+    assert projected_points.shape[1] == 2
+
+    diff = projected_points - observed_keypoints
+    l2_dist = torch.sum(diff ** 2, dim=1)
+    l1_dist = torch.sqrt(l2_dist + 1e-8)  # 수치적 안정성을 위한 epsilon
+
+    # Huber loss
+    condition = l1_dist < delta
+    loss = torch.where(condition,
+                       0.5 * l2_dist,
+                       delta * (l1_dist - 0.5 * delta))
+    return loss
 
 def get_loss_gaussian(config, image, viewpoint, projection):
     gt_image = viewpoint.original_image.cuda()

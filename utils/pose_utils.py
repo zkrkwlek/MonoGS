@@ -91,7 +91,7 @@ def SE3_exp(tau):
     T[3, 3] = 1
     return T
 
-def compute_F12(R1, t1, R2, t2, K1, K2):
+def compute_F12(R1, t1, R2, t2, K1_inv, K2_inv):
     # R1, R2: (3,3) tensor
     # t1, t2: (3,) tensor
     # K1, K2: (3,3) tensor
@@ -100,7 +100,8 @@ def compute_F12(R1, t1, R2, t2, K1, K2):
     R12 = R1 @ R2.t()
     t12 = -R1 @ R2.t() @ t2 + t1
     t12x = skew_sym_mat(t12)
-    M = torch.linalg.inv(K1.t()) @ t12x @ R12 @ torch.linalg.inv(K2)
+    M = K1_inv.t() @ t12x @ R12 @ K2_inv
+    #M = torch.linalg.inv(K1.t()) @ t12x @ R12 @ torch.linalg.inv(K2)
     return M
 
 def update_pose(camera, converged_threshold=1e-4):

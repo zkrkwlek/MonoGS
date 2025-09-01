@@ -24,6 +24,12 @@ class Device:
         self.cx = self.K[0][2]
         self.cy = self.K[1][2]
 
+        self.K_inv_gpu = torch.tensor([
+        [1.0/self.fx,    0,    -self.cx/self.fx],
+        [0,      1.0/self.fy,  -self.cy/self.fy],
+        [0,         0,        1]
+    ], device='cuda', dtype=torch.float32)
+
         self.fovx = focal2fov(self.fx, self.w)
         self.fovy = focal2fov(self.fy, self.h)
 

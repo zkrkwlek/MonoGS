@@ -66,12 +66,12 @@ def convert_xyz(rounded_keypoints,color,depth):
 
     return result, valid_colors, valid_mask
 
-def pixels_to_pc(points, R, t, fx, fy, cx, cy):
-    R = R.type(torch.float32)
-    t = t.type(torch.float32)
-    u = points[:, 0]
-    v = points[:, 1]
-    d = points[:, 2]
+def unproject_pixel_to_pc(points, R, t, fx, fy, cx, cy):
+    #R = R.type(torch.float32)
+    #t = t.type(torch.float32)
+    u = points[:, 0] #x
+    v = points[:, 1] #y
+    d = points[:, 2] #depth
 
     Rwc = R.T
     twc = -Rwc@t
