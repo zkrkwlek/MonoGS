@@ -69,10 +69,11 @@ def predict(message):
 
     return
 
-def DeviceConnect(id, src):
+def DeviceConnect(id, src, ts = None):
 
     res = sess.post(FACADE_SERVER_ADDR + "/Download?keyword=" + "DeviceConnect" + "&id=" + str(id) + "&src=" + src, "")
-    cam_data = np.frombuffer(res.content, dtype=np.float32)
+    #print(len(res.content), len(res.content[:80]))
+    cam_data = np.frombuffer(res.content[:80], dtype=np.float32)
 
     w = int(cam_data[0])
     h = int(cam_data[1])
@@ -88,7 +89,7 @@ def DeviceConnect(id, src):
     slam.AddDevice(src, K, D, w, h, bMapper)
     print('device', src, id, cam_data, bMapper)
 
-def yolosegc(id, src):
+def yolosegc(id, src, ts = None):
     res = sess.post(FACADE_SERVER_ADDR + "/Download?keyword=" + "yolosegc" + "&id=" + str(id) + "&src=" + src,"")
     contour_array = np.frombuffer(res.content, dtype=np.uint16)
 
@@ -113,14 +114,14 @@ def yolosegc(id, src):
             break
     slam.AddContours(id, contours,src=src.split('.')[0])
 
-def ressalad(id,src):
+def ressalad(id,src, ts = None):
     res = sess.post(
         FACADE_SERVER_ADDR + "/Download?keyword=" + "ressalad" + "&id=" + str(id) + "&src=" + src, "")
     bdata = gzip.decompress(res.content)
     pr_desc = np.frombuffer(bdata, dtype=np.float32)
     slam.AddPlaceRecogDesc(id, pr_desc, src=src)
 
-def resdepthanything(id,src):
+def resdepthanything(id,src, ts = None):
 
     #if not slam.CheckFrame(id):
         res_depth = sess.post(
@@ -203,13 +204,13 @@ def resdepthanything(id,src):
         cv2.waitKey(1)
         """
 
-def FrameUpdate(id, src):
+def FrameUpdate(id, src, ts = None):
 
     res_pose = sess.post(FACADE_SERVER_ADDR + "/Download?keyword=" + "FrameUpdate" + "&id=" + str(id) + "&src=" + src, "")
     array = np.frombuffer(res_pose.content, dtype=np.float32)
     fid = int(array[1])
 
-    res_rgb = sess.post(FACADE_SERVER_ADDR + "/Download?keyword=" + datatype + "&id=" + str(id) + "&src=" + src, "")
+    res_rgb = sess.post(FACADE_SERVER_ADDR + "/Download?keyword=" + "GSImage" + "&id=" + str(id) + "&src=" + src, "")
     img_array = np.frombuffer(res_rgb.content, dtype=np.uint8)
     img_cv = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
 
@@ -219,7 +220,7 @@ def FrameUpdate(id, src):
         #print('frame',src, id, R,t)
         image = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
 
-        frame = slam.AddFrame(fid, image, None, None, depth=None, src=src)
+        frame = slam.AddFrame(fid, image, None, None, depth=None, src=src, ts = ts)
 
         device = slam.devices[src]
 
@@ -228,7 +229,7 @@ def FrameUpdate(id, src):
         else:
             slam.Alignment(src, id)
 
-def ObjectMapCreation(id,src):
+def ObjectMapCreation(id,src, ts = None):
     res = sess.post(FACADE_SERVER_ADDR + "/Download?keyword=" + "ObjectMapCreation" + "&id=" + str(id) + "&src=" + src,"")
     array = np.frombuffer(res.content, dtype=np.float32)
     t = array[:3]
@@ -239,7 +240,7 @@ def ObjectMapCreation(id,src):
 
     #slam.backend.ObjectMapInitialization()
  
-def ObjectMapUpdate(id,src):
+def ObjectMapUpdate(id,src, ts = None):
     #print("ObjectMapUpdate")
     """
     data = ujson.loads(msg.decode())
@@ -313,13 +314,14 @@ def udpthread():
         id = data['id']
         src = data['src']
         keyword = data['keyword']
+        ts = data['ts2'] if 'ts2' in data else None
 
         #cpu_usage = p.cpu_percent(interval=1)
         #memory_usage = p.memory_info().rss
         #print(f"Server = CPU Usage: {cpu_usage}%, Memory Usage: {memory_usage} bytes = cores ", os.cpu_count())
 
         if keyword in globals():
-            globals()[keyword](id,src)
+            globals()[keyword](id,src, ts)
         #predict(message)
 
 def start_slam_process(slam_instance, queue):

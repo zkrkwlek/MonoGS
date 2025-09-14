@@ -17,5 +17,8 @@ class FeatureManager:
     def detectAndCompute(self, color):
         return self.xfeat.detectAndCompute(color)[0]
 
+    def match(self, d0, d1):
+        return self.xfeat.match(d0,d1)
+
     def match_lightglue(self, d0, d1):
         return self.xfeat.match_lighterglue(d0,d1)

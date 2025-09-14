@@ -7,14 +7,16 @@ import cv2
 from utils.camera_utils import Camera
 from edge_assisted.gaussian_feature import project_pc_to_pixel
 from utils.pose_utils import SE3_exp
+from scipy.spatial.transform import Rotation
 
 class EdgeFrame:
-    def __init__(self,id,color,R,t,depth=None, src = None):
+    def __init__(self,id,color,R,t,depth=None, src = None, ts = 0.0):
         self.id = id
         self.kf_id = -1
         self.color = color #수정 안함.
         self.depth = depth #수정 안함
         self.src = src
+        self.ts = ts
         self.is_keyframe = False
 
         ##오브젝트 영역
@@ -59,6 +61,15 @@ class EdgeFrame:
         self.contours_mask = None
         self.T = None
 
+    def GetPoseString(self, R, t):
+        #Rwc = self.T[:3,:3]
+        #twc = self.T[:3, 3]
+        Rwc = R.T
+        twc = -Rwc@t
+        q = Rotation.from_matrix((Rwc.cpu().numpy())).as_quat()
+        q_str = " ".join(map(str, q))
+        t_str = " ".join(map(str, twc.tolist()))
+        return str(self.ts)+' '+q_str+' '+t_str+"\n"
 
     def UpdatePose(self, R, t):
         self.T = np.zeros((4, 4), dtype=np.float64)

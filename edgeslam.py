@@ -24,6 +24,8 @@ from edge_assisted.feature_manager import FeatureManager
 from edge_assisted.pose_optimizer2 import PnPOptimizer
 from edge_assisted.place_recognizer import PlaceRecognizer
 
+from atomicx import AtomicBool
+
 import yappi
 
 class EdgeGSSLAM(SLAM_WIN):
@@ -83,8 +85,15 @@ class EdgeGSSLAM(SLAM_WIN):
         self.frontend = EdgeFrontEnd(self.config)
         self.backend = EdgeBackEnd(self.config)
 
+        #gs rasterization으로 pose까지 변경할지 체크
         self.frontend.gs_pose = gs_pose
         self.backend.gs_pose = gs_pose
+
+        ##mapping atomic bool
+        bDoingMapping = AtomicBool()
+        bDoingMapping.store(True)
+        self.frontend.bDoingMapping = bDoingMapping
+        self.backend.bDoingMapping = bDoingMapping
 
         #안쓰임
         FeatureManagerA = GaussianPointManager()
@@ -166,16 +175,17 @@ class EdgeGSSLAM(SLAM_WIN):
         p = threading.Thread(target=self.frontend.after_depth, args=(device, idx))
         p.start()
 
-    def AddFrame(self, fid, img, R, t, depth = None, src = None):
+    def AddFrame(self, fid, img, R, t, depth = None, src = None, ts = None):
         device = self.devices[src]
         if fid in device.frames:
             #f = self.dataset[str(fid)]
             f = device.frames[fid]
             f.color = img
             f.depth = depth
+            f.ts = ts
             f.UpdatePose(R,t)
         else:
-            f = EdgeFrame(fid, img, None, None, depth=depth, src=src)
+            f = EdgeFrame(fid, img, None, None, depth=depth, src=src, ts = ts)
             device.frames[fid] = f
             #self.dataset[fid] = f
         return f
@@ -236,7 +246,7 @@ class EdgeGSSLAM(SLAM_WIN):
 
         backend_process.start()
         print("backend start")
-        frontend_process = threading.Thread(target=self.frontend.run)
+        frontend_process = threading.Thread(target=self.frontend.run_with_graph)
         frontend_process.start()
         print("frontend start")
         #self.frontend.backend_queue.put(["pause"])
