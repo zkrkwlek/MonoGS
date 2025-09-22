@@ -10,7 +10,7 @@ from utils.pose_utils import SE3_exp
 from scipy.spatial.transform import Rotation
 
 class EdgeFrame:
-    def __init__(self,id,color,R,t,depth=None, src = None, ts = 0.0):
+    def __init__(self,id,color,R,t,depth=None, src = None, T = None, ts = 0.0):
         self.id = id
         self.kf_id = -1
         self.color = color #수정 안함.
@@ -18,6 +18,8 @@ class EdgeFrame:
         self.src = src
         self.ts = ts
         self.is_keyframe = False
+
+        self.T = T
 
         ##오브젝트 영역
         ##데이터 수정 가능
@@ -30,6 +32,7 @@ class EdgeFrame:
         self.tag = None
 
         ##T는 지금은 이용 안함.
+        """
         if R is None:
             R = np.eye(3,dtype = np.float32)
         if t is None:
@@ -38,6 +41,7 @@ class EdgeFrame:
         self.T[:3, :3] = R
         self.T[:3, 3] = t.flatten()  # 또는 M[:3, 3] = b.squeeze()
         self.T[3, 3] = 1.0
+        """
 
         self.keypoints = None # np 수정 안함.-> gpu
         self.descriptors = None #np 수정 안함.
@@ -46,6 +50,8 @@ class EdgeFrame:
         #self.gaussianpoints = None #torch, cpu로 내려야 하나? 이것만 수정함. 이걸 통신하자. # 이게 prune 후 frontend로 갈 때 prev, 아직 갱신 안된 키프레임도 처리되어야 함
         #self.gaussians = None
         #self.inliers = None #전송안하면, 초기에 넘겨받고 갱신해야 함. 이것도 torch임.
+        self.frame_gaussian = None
+        self.frame_gaussian_ids = None
 
     def clean(self):
         self.color = None

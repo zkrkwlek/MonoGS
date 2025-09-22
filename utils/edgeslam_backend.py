@@ -155,7 +155,7 @@ class EdgeBackEnd(WinBackEnd):
                                                                   device='cuda')], dim=1)
 
     def add_next_kf(self, frame_idx, viewpoint, init=False, scale=2.0, depth_map=None, keypoints = None, mask = None, downsample_factor = None):
-
+        print('??????')
         #self.update_gaussian_observation_with_frame(frame)
         if downsample_factor is None:
             if init:
@@ -166,6 +166,7 @@ class EdgeBackEnd(WinBackEnd):
         if mask is None:
             mask = torch.ones((viewpoint.image_height, viewpoint.image_width), device='cuda', dtype=torch.bool).cpu().numpy()
 
+        print("mask test 0 ", mask)
         self.gaussians.extend_from_pcd_seq(
             viewpoint, kf_id=frame_idx, init=init, scale=scale, depthmap=depth_map,keypoints=keypoints, downsample_factor = downsample_factor, mask = mask
         )

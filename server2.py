@@ -125,8 +125,7 @@ def resdepthanything(id,src, ts = None):
 
     #if not slam.CheckFrame(id):
         res_depth = sess.post(
-            FACADE_SERVER_ADDR + "/Download?keyword=" + "resdepthanything" + "&id=" + str(id) + "&src=" + src,
-            "")
+            FACADE_SERVER_ADDR + "/Download?keyword=" + "resdepthanything" + "&id=" + str(id) + "&src=" + src,"")
         depth_array = np.frombuffer(res_depth.content, dtype=np.uint8)
         depth = cv2.imdecode(depth_array, cv2.IMREAD_UNCHANGED)
         depth = depth.astype(np.float64) / 1000.0

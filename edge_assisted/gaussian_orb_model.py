@@ -484,6 +484,7 @@ class GaussianOrbModel(GaussianModel):
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+
         if new_kf_ids is not None:
             self.unique_kfIDs = torch.cat((self.unique_kfIDs, new_kf_ids)).int()
         if new_n_obs is not None:
@@ -559,6 +560,7 @@ class GaussianOrbModel(GaussianModel):
                 torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool),
             )
         )
+
         remove_split_ids = self.unique_gaussian_ids[prune_filter]
         self.prune_points(prune_filter)
 

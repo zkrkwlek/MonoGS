@@ -26,10 +26,12 @@ from edge_assisted.place_recognizer import PlaceRecognizer
 
 from atomicx import AtomicBool
 
+from edge_assisted.mapping_module import MappingModule
+
 import yappi
 
 class EdgeGSSLAM(SLAM_WIN):
-    def __init__(self, config, tracking_mode=False, mapping_update_pose = False, gs_pose = False, save_dir=None):
+    def __init__(self, config, tracking_mode=False, mapping_update_pose = False, gs_pose = False, save_dir=None, UseXfeat = False):
         super().__init__(config, save_dir)
 
         start = torch.cuda.Event(enable_timing=True)
@@ -84,6 +86,7 @@ class EdgeGSSLAM(SLAM_WIN):
 
         self.frontend = EdgeFrontEnd(self.config)
         self.backend = EdgeBackEnd(self.config)
+        self.mapping_module = MappingModule(self.config)
 
         #gs rasterization으로 pose까지 변경할지 체크
         self.frontend.gs_pose = gs_pose
@@ -101,14 +104,15 @@ class EdgeGSSLAM(SLAM_WIN):
         self.backend.FeatureManager = FeatureManagerA
 
         #xfeat
-        XFeat = FeatureManager()
-        self.frontend.feature_manager = XFeat
-        self.backend.feature_manager = XFeat
+        if UseXfeat:
+            XFeat = FeatureManager()
+            self.frontend.feature_manager = XFeat
+            self.backend.feature_manager = XFeat
 
         #gtsam
-        PoseOptimizer = PnPOptimizer()
-        self.frontend.pose_optimizer = PoseOptimizer
-        self.backend.pose_optimizer = PoseOptimizer
+        #PoseOptimizer = PnPOptimizer()
+        #self.frontend.pose_optimizer = PoseOptimizer
+        #self.backend.pose_optimizer = PoseOptimizer
 
         #salad
         _PlaceRecognizer = PlaceRecognizer()
@@ -158,6 +162,42 @@ class EdgeGSSLAM(SLAM_WIN):
         self.devices={}
         self.backend.devices  = self.devices
         self.frontend.devices = self.devices
+        self.mapping_module.devices = self.devices
+
+        #mapping module 초기화
+        self.mapping_module.dataset = self.dataset
+        self.mapping_module.gaussians = self.gaussians
+        self.mapping_module.background = self.background
+        self.mapping_module.cameras_extent = 6.0
+        self.mapping_module.pipeline_params = self.pipeline_params
+        self.mapping_module.opt_params = self.opt_params
+        self.mapping_module.frontend_queue = frontend_queue
+        self.mapping_module.backend_queue = backend_queue
+        self.mapping_module.live_mode = self.live_mode
+        self.mapping_module.pose_update = mapping_update_pose
+        self.mapping_module.set_hyperparams()
+
+        #local gs 수정 필요
+        self.keyframes = {}
+        self.mapping_module.keyframes = self.keyframes
+
+    def UpdateSparseMap(self, local_sparse_map):
+        #id, pos
+        self.mapping_module.update_sparse_gaussian_map(local_sparse_map)
+        pass
+
+    def GenerateLocalMap(self, target_kf_id, neighbor_kf_ids, src):
+        #새로운 KF
+        #그 안의 스파스 맵
+        #인접한 키프레임 정보
+
+        #select local gaussian
+        #self.mapping_module.select_local_gaussians(target_kf_id, neighbor_kf_ids)
+        #generate local gaussian
+        #optimize local gaussian
+        self.mapping_module.local_gaussian_mapping(target_kf_id, neighbor_kf_ids, src)
+
+        pass
 
     def AddDevice(self, src, K, D, w, h, bMapper = True):
         device = Device(src, K, D, w, h, bMapper = bMapper)
@@ -174,6 +214,18 @@ class EdgeGSSLAM(SLAM_WIN):
         f.depth = depth
         p = threading.Thread(target=self.frontend.after_depth, args=(device, idx))
         p.start()
+
+    def AddKeyFrame(self, kf_id, img, keypoints, depth, T, src):
+        f = EdgeFrame(kf_id, img, None,None, depth=depth, T = T)
+        f.keypoints = keypoints
+        self.keyframes[kf_id] = f
+        device = self.devices[src]
+        viewpoint = self.mapping_module.convert_viewpoint(device, f, kf_id)
+        T = torch.from_numpy(f.T).cuda()
+        #T의 타입 설정이 중요
+        viewpoint.R = T[:3, :3]
+        viewpoint.T = T[:3, 3]
+        self.mapping_module.viewpoints[kf_id] = viewpoint
 
     def AddFrame(self, fid, img, R, t, depth = None, src = None, ts = None):
         device = self.devices[src]

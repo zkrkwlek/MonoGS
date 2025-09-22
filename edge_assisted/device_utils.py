@@ -33,6 +33,8 @@ class Device:
         self.fovx = focal2fov(self.fx, self.w)
         self.fovy = focal2fov(self.fy, self.h)
 
+        print(self.w, self.h)
+
         self.distorted = self.is_distorted(self.D)
         if self.distorted:
             self.map1x, self.map1y = cv2.initUndistortRectifyMap(
@@ -112,6 +114,7 @@ class Device:
 
     def is_used(self):
         return bool(self.used.load())
+
 
     def convert_viewpoint(self, idx):
 
