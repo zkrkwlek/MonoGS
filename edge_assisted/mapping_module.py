@@ -26,20 +26,6 @@ from utils.pose_utils import SE3_exp, skew_sym_mat, compute_F12
 
 from edge_assisted.gaussian_local_model import LocalGaussianFrame, LocalGaussianModel
 
-from utils.datahandle_utils import move_camera_to_gpu, move_camera_to_cpu, move_gaussianmodel_to_cpu
-from utils.datahandle_utils import move_occ_visibility_to_cpu
-#from edge_assisted.gaussian_feature import GaussianPointManager
-from edge_assisted.localmap_utils import get_local_gaussians
-#from edge_assisted.object_manager import ObjectManager
-from edge_assisted.object_loss import ObjectLoss
-from edge_assisted.gaussian_orb_model import GaussianOrbModel
-from edge_assisted.device_utils import ConvertFramdId
-from edge_assisted.pose_optimizer2 import PnPOptimizer
-
-from collections import defaultdict
-import psutil
-import cProfile
-
 class MappingModule(WinBackEnd):
     def __init__(self, config):
         super().__init__(config)
@@ -68,6 +54,20 @@ class MappingModule(WinBackEnd):
         self.devices = None
 
         self.init = False
+
+        ##통신
+        self.sess = None
+        self.Addr = None
+
+    def convert_depth(self, viewpoint):
+        rgb_boundary_threshold = self.config["Training"]["rgb_boundary_threshold"]
+        gt_img = viewpoint.original_image.cuda()
+        valid_rgb = (gt_img.sum(dim=0) > rgb_boundary_threshold)[None]
+        # use the observed depth
+        initial_depth = torch.from_numpy(viewpoint.depth).unsqueeze(0)
+        initial_depth[~valid_rgb.cpu()] = 0  # Ignore the invalid rgb pixels
+        initial_depth[initial_depth < 0.01] = 0
+        return initial_depth[0].numpy()
 
     def convert_viewpoint(self, device, frame, idx):
 
@@ -106,7 +106,7 @@ class MappingModule(WinBackEnd):
             device='cuda',
         )
 
-    def add_next_kf(self, frame_idx, viewpoint, init=False, scale=2.0, depth_map=None, keypoints = None, mask = None, downsample_factor = None):
+    def add_next_kf(self, local_gaussian, frame_idx, viewpoint, init=False, scale=2.0, depth_map=None, keypoints = None, mask = None, downsample_factor = None):
         #self.update_gaussian_observation_with_frame(frame)
         if downsample_factor is None:
             if init:
@@ -116,46 +116,35 @@ class MappingModule(WinBackEnd):
 
         if mask is None:
             mask = torch.ones((viewpoint.image_height, viewpoint.image_width), device='cuda', dtype=torch.bool).cpu().numpy()
-        self.gaussians.extend_from_pcd_seq(
-            viewpoint, kf_id=frame_idx, init=init, scale=scale, depthmap=depth_map,keypoints=keypoints, downsample_factor = downsample_factor, mask = mask
+        return local_gaussian.extend_from_pcd_seq(
+            viewpoint, kf_id=frame_idx, init=init, scale=scale, depthmap=depth_map,downsample_factor = downsample_factor, mask = mask
         )
-        del mask
-        return
 
-    def preprocessing_add_kf(self):
-        self.gaussians.observation_indices = torch.cat([self.gaussians.observation_indices,
-                                                        torch.full((self.gaussians.observation_indices.shape[0], 1),
-                                                                   -1, device='cuda', dtype=torch.int32)], dim=1)
-        self.gaussians.observation_points = torch.cat([self.gaussians.observation_points,
-                                                       torch.full((self.gaussians.observation_points.shape[0], 2), -1.0,
-                                                                  device='cuda')], dim=1)
 
-    def initialize_gaussian(self, kf_id, viewpoint, depth_map):
-        self.add_next_kf(kf_id, viewpoint, init = True, depth_map=depth_map, downsample_factor=1)
+    def initialize_gaussian(self, local_gaussian, kf_id, viewpoint, depth_map):
+        return self.add_next_kf(local_gaussian, kf_id, viewpoint, init = True, depth_map=depth_map, downsample_factor=1)
 
-    def create_gaussian(self, local_gaussian_mask, kf_id, viewpoint, depth_map):
+    def create_gaussian(self, local_gaussian, kf_id, viewpoint, depth_map):
         with torch.no_grad():
-            projection, _, valid_projection = project_pc_to_pixel(self.gaussians.get_xyz[local_gaussian_mask], viewpoint.R, viewpoint.T,
+            """
+            projection, _, valid_projection = project_pc_to_pixel(local_gaussian.get_xyz, viewpoint.R, viewpoint.T,
                                                                   viewpoint.fx, viewpoint.fy, viewpoint.cx, viewpoint.cy,
                                                                   viewpoint.image_width, viewpoint.image_height)
 
             tmp_gaussian_mask = calculate_keypoint_mask(projection[valid_projection], viewpoint.image_width,
                                                         viewpoint.image_height, )  # max_radius=1)#.squeeze(0)
             tmp_gaussian_mask = ~tmp_gaussian_mask
-            Nold = self.gaussians.get_xyz.size()[0]
-            self.add_next_kf(kf_id, viewpoint, init = True, depth_map=depth_map, downsample_factor=1, mask=tmp_gaussian_mask.squeeze(0).cpu().numpy())
-            #Nnew = self.gaussians.get_xyz.size()[0]
-            print('obs test',Nold, kf_id, self.gaussians.observation_indices.shape)
-            #self.gaussians.observation_indices[Nold:-1, kf_id] = 1
+            """
+            return self.add_next_kf(local_gaussian, kf_id, viewpoint, init = True, depth_map=depth_map, downsample_factor=1)#, mask=tmp_gaussian_mask.squeeze(0).cpu().numpy())
 
     def construct_local_frame(self, local_gaussian, frame):
         #추후에는 param이 아닌 tensor로 전달될 것임.
-        local_gaussian._xyz = torch.cat((local_gaussian._xyz, frame.frame_gaussian._xyz.data))
-        local_gaussian._features_dc = torch.cat((local_gaussian._features_dc, frame.frame_gaussian._features_dc.data))
-        local_gaussian._features_rest = torch.cat((local_gaussian._features_rest, frame.frame_gaussian._features_rest.data))
-        local_gaussian._opacity = torch.cat((local_gaussian._opacity, frame.frame_gaussian._opacity.data))
-        local_gaussian._scaling = torch.cat((local_gaussian._scaling, frame.frame_gaussian._scaling.data))
-        local_gaussian._rotation = torch.cat((local_gaussian._rotation, frame.frame_gaussian._rotation.data))
+        local_gaussian._xyz = torch.cat((local_gaussian._xyz, frame.frame_gaussian._xyz)).detach()
+        local_gaussian._features_dc = torch.cat((local_gaussian._features_dc, frame.frame_gaussian._features_dc)).detach()
+        local_gaussian._features_rest = torch.cat((local_gaussian._features_rest, frame.frame_gaussian._features_rest)).detach()
+        local_gaussian._opacity = torch.cat((local_gaussian._opacity, frame.frame_gaussian._opacity)).detach()
+        local_gaussian._scaling = torch.cat((local_gaussian._scaling, frame.frame_gaussian._scaling)).detach()
+        local_gaussian._rotation = torch.cat((local_gaussian._rotation, frame.frame_gaussian._rotation)).detach()
 
     def construct_loocal_gaussians(self, local_gaussian, kf_ids):
 
@@ -164,18 +153,9 @@ class MappingModule(WinBackEnd):
                 kf = self.keyframes[id]
                 self.construct_local_frame(local_gaussian, kf)
 
-        local_gaussian.training_setup(self.opt_params)
-
-        print('local gaussian', local_gaussian.get_xyz.shape[0])
-
-
-    def select_local_gaussians(self, neigh_kf_ids):
-        mask = (self.gaussians.observation_indices[:,neigh_kf_ids] > -1).any(dim=1)
-        return mask
-
-
     def optimization(self, kf_windows, local_gs, mask = None, iter = 1):
 
+        #print('before',local_gs.get_xyz[0,:], local_gs.get_xyz.requires_grad)
         for i in range(iter):
             loss_mapping = 0
 
@@ -183,7 +163,25 @@ class MappingModule(WinBackEnd):
             visibility_filter_acm = []
 
             for id in kf_windows:
+                if id not in self.viewpoints:
+                    continue
+
                 vp = self.viewpoints[id]
+
+                local_gs.optimizer.add_param_group(
+                    {
+                        "params": [vp.exposure_a],
+                        "lr": 0.01,
+                        "name": "exposure_a_{}".format(vp.uid),
+                    }
+                )
+                local_gs.optimizer.add_param_group(
+                    {
+                        "params": [vp.exposure_b],
+                        "lr": 0.01,
+                        "name": "exposure_b_{}".format(vp.uid),
+                    }
+                )
 
                 render_pkg = render(
                     vp, local_gs, self.pipeline_params, self.background, mask = mask
@@ -226,39 +224,37 @@ class MappingModule(WinBackEnd):
                     viewspace_point_tensor_acm[idx], visibility_filter_acm[idx]
                 )
             """
-
-            self.gaussians.optimizer.step()
-            self.gaussians.optimizer.zero_grad(set_to_none=True)
-            self.gaussians.update_learning_rate(self.iteration_count)
-
-            """
-            remove_ids = self.gaussians.densify_and_prune(
-                self.opt_params.densify_grad_threshold,
-                self.init_gaussian_th,
-                self.init_gaussian_extent,
-                None,
-            )
-            """
-
-    def update_sparse_gaussian_map(self, local_sparse_map):
-        pass
+            with torch.no_grad():
+                local_gs.optimizer.step()
+                local_gs.optimizer.zero_grad(set_to_none=True)
+                local_gs.update_learning_rate(self.iteration_count)
+                #print('after', i, local_gs.get_xyz[0, :], loss_mapping)
+                """
+                remove_ids = self.gaussians.densify_and_prune(
+                    self.opt_params.densify_grad_threshold,
+                    self.init_gaussian_th,
+                    self.init_gaussian_extent,
+                    None,
+                )
+                """
+        #print('after', self.keyframes[kf_windows[0]].frame_gaussian.get_xyz[0,:])
 
     def local_gaussian_mapping(self, kf_id, neigh_kf_ids, src):
         device = self.devices[src]
         keyframe = self.keyframes[kf_id]
         viewpoint = self.viewpoints[kf_id]
+        depth_map = self.convert_depth(viewpoint)
+        #viewpoint.compute_grad_mask(self.config)
 
         a = time.time()
 
+        local_gaussian = LocalGaussianModel(3, config=self.config, opt_params=self.opt_params)
         if neigh_kf_ids is not None:
-            local_gaussian = LocalGaussianModel(3, config=self.config, opt_params=self.opt_params)
             self.construct_loocal_gaussians(local_gaussian, neigh_kf_ids)
 
         a2 = time.time()
 
-        self.preprocessing_add_kf()
         if self.init:
-            local_gaussian_mask = self.select_local_gaussians(neigh_kf_ids)
             ##이미지 저장
             render_pkg = render(
                 viewpoint, local_gaussian, self.pipeline_params, self.background
@@ -290,45 +286,64 @@ class MappingModule(WinBackEnd):
             )
             loss_kf = loss_rgb * self.weight_rgb + loss_depth * self.weight_depth
 
-            Nold = self.gaussians.get_xyz.shape[0]
-
             ##이미지 저장
-            self.create_gaussian(local_gaussian_mask, kf_id, viewpoint, viewpoint.depth)
-            Nlg = torch.count_nonzero(local_gaussian_mask).item()
+            p, f1, f2, o, s, r = self.create_gaussian(local_gaussian, kf_id, viewpoint, depth_map)
+
+            keyframe.frame_gaussian = LocalGaussianFrame(p, f1, f2, o, s, r)
+            self.construct_local_frame(local_gaussian, keyframe)
+            local_gaussian.set_requires_true()
+            local_gaussian.training_setup(self.opt_params)
 
             kf_window = [kf_id] + neigh_kf_ids
             c = time.time()
-            self.optimization(kf_window, local_gaussian, iter = 30)
+            self.optimization(kf_window, local_gaussian, iter = 1)
             d = time.time()
 
-            #print(self.gaussians.get_xyz.grad.norm(dim=-1))
+            ##return
+            render_pkg = render(
+                viewpoint, local_gaussian, self.pipeline_params, self.background
+            )
+            (
+                image,
+                depth,
+                opacity,
+            ) = (
+                render_pkg["render"],
+                render_pkg["depth"],
+                render_pkg["opacity"],
+            )
+            #압축
+            depth = depth.squeeze().detach().cpu().numpy()
+            scaled = (depth*1000).astype(np.uint16)
+            _,compressed = cv2.imencode('.png',scaled)
 
-            new_gaussian_mask = torch.zeros(self.gaussians.get_xyz.shape[0], device='cuda', dtype=torch.bool)
-            new_gaussian_mask[Nold:-1] = True
-
-            keyframe.frame_gaussian = LocalGaussianFrame(self.gaussians.get_xyz[new_gaussian_mask],
-               self.gaussians._features_dc[new_gaussian_mask],
-               self.gaussians._features_rest[new_gaussian_mask],
-               self.gaussians.get_opacity[new_gaussian_mask],
-               self.gaussians._scaling[new_gaussian_mask],
-               self.gaussians._rotation[new_gaussian_mask])
+            #전송
+            self.sess.post(self.Addr + "/Upload?keyword=" + "resgsmapping" + "&id=" + str(kf_id) + "&src=" + src, compressed.tobytes())
 
         else:
-            self.initialize_gaussian(kf_id, viewpoint,viewpoint.depth)
+            p, f1, f2, o, s, r = self.initialize_gaussian(local_gaussian, kf_id, viewpoint,depth_map)
+            keyframe.frame_gaussian = LocalGaussianFrame(p, f1, f2, o, s, r)
             self.init = True
-            Nlg = 0
             d = 0
             c = 0
-
-            keyframe.frame_gaussian = LocalGaussianFrame(self.gaussians.get_xyz,
-                self.gaussians._features_dc,
-                self.gaussians._features_rest,
-                self.gaussians.get_opacity,
-                self.gaussians._scaling,
-                self.gaussians._rotation)
 
         b = time.time()
         #print(viewpoint.uid, viewpoint.R, viewpoint.T, viewpoint.R.dtype)
         if neigh_kf_ids is None:
             neigh_kf_ids = []
-        print('local mapping', kf_id, len(neigh_kf_ids), a2-a, b-a, d-c, Nlg, self.gaussians.get_xyz.shape[0])
+        print('local mapping', kf_id, len(neigh_kf_ids), a2-a, b-a, d-c, local_gaussian.get_xyz.shape[0])
+
+
+
+    def select_local_gaussians(self, neigh_kf_ids):
+        mask = (self.gaussians.observation_indices[:,neigh_kf_ids] > -1).any(dim=1)
+        return mask
+    def update_sparse_gaussian_map(self, local_sparse_map):
+        pass
+    def preprocessing_add_kf(self):
+        self.gaussians.observation_indices = torch.cat([self.gaussians.observation_indices,
+                                                        torch.full((self.gaussians.observation_indices.shape[0], 1),
+                                                                   -1, device='cuda', dtype=torch.int32)], dim=1)
+        self.gaussians.observation_points = torch.cat([self.gaussians.observation_points,
+                                                       torch.full((self.gaussians.observation_points.shape[0], 2), -1.0,
+                                                                  device='cuda')], dim=1)
