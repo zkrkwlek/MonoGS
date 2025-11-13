@@ -16,7 +16,7 @@ import numpy as np
 from openai import OpenAI
 import time
 # OpenAI 설정
-client = OpenAI(api_key="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")
+client = OpenAI(api_key="AAA")
 # 멀티뷰 경로 설정
 base_dir = "/home/daringspirit/SegAnyGaussians/datasets/lerf/figurines/furniture"
 output_path = os.path.join(base_dir, "gaussian_physics_metadata.json")
