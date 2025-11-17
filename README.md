@@ -45,7 +45,7 @@ The method demonstrates the first monocular SLAM solely based on 3D Gaussian Spl
 - **[New]** Speed-up version of our code is available in `dev.speedup` branch, It achieves up to 10fps on monocular fr3/office sequence while keeping consistent performance (tested on RTX4090/i9-12900K). The code will be merged into the main branch after further refactoring and testing.
 
 # Getting Started
-## Installation
+## Installation..
 ```
 git clone https://github.com/muskie82/MonoGS.git --recursive
 cd MonoGS
