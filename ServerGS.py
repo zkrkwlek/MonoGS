@@ -114,6 +114,7 @@ def reqgsmapping(id, src, ts = '0.0'):
     device_name = strsplit[1]
     data_type = strsplit[2]
     frame_id = (strsplit[3])
+
     if len(strsplit) > 4:
         neighbor_kfs = [int(x) for x in strsplit[4:]]
     else:
@@ -168,24 +169,28 @@ def reqgsmapping(id, src, ts = '0.0'):
     #optimization
     #return
 
-    nw = int(image.shape[1]/4)
-    nh = int(image.shape[0]/4)
+    k = 4
+    nw = int(image.shape[1]/k)
+    nh = int(image.shape[0]/k)
 
     image = cv2.resize(image, (nw,nh))
     depth = cv2.resize(depth, (nw,nh))
+    keypoints = (keypoints/k).int()
 
     slam.AddKeyFrame(kf_id, image, keypoints, depth, T, device_name)
 
     #observation
     b = time.time()
-    print('Gaussian Splatting Mapping', b-a, map, kf_id, device_name, data_type, frame_id,":",image.shape, depth.shape, keypoints.shape, tmp_map_array.shape)
-    print('neighbor', neighbor_kfs)
+    #print('Gaussian Splatting Mapping', b-a, map, kf_id, device_name, data_type, frame_id,":",image.shape, depth.shape, keypoints.shape, tmp_map_array.shape)
+    #print('neighbor', neighbor_kfs)
 
     # for neigh_id in neighbor_kfs:
     #    print(slam.keyframes[neigh_id].id)
 
     #thread??
     slam.GenerateLocalMap(kf_id, neighbor_kfs, device_name)
+    slam.mapping_module.Addr = FACADE_SERVER_ADDR
+    slam.mapping_module.sess = sess
 
 def GSDeviceConnect(id, src, ts = '0.0'):
     res = sess.post(FACADE_SERVER_ADDR + "/Download?keyword=" + "GSDeviceConnect" + "&id=" + str(id) + "&src=" + src, "")
@@ -243,7 +248,7 @@ if __name__ == '__main__':
     ##유니크 키워드 생성 필요
     ##다른 서버 또는 기기에서 해당 데이터 이용 가능
     parser.add_argument(
-        '--SKeywords', type=str,default='requnidepth,resobjrecon,reqsalad',
+        '--SKeywords', type=str,default='requnidepth,resobjrecon,reqsalad,resgsmapping',
         help='Sendeded keyword lists')
     ##전송받는 데이터의 타입 설정.
     parser.add_argument(
