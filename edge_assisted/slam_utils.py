@@ -17,7 +17,6 @@ def get_reprojection_loss(gaussians, keypoints):
     #print(l1, l1.mean())
     return l2_dist
 
-
 def get_reprojection_loss_huber(projected_points, observed_keypoints, delta=3.0):
     """
     Huber loss를 사용한 reprojection loss (outlier에 더 robust)
