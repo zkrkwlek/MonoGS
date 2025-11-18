@@ -195,9 +195,9 @@ class EdgeGSSLAM(SLAM_WIN):
         #self.mapping_module.select_local_gaussians(target_kf_id, neighbor_kf_ids)
         #generate local gaussian
         #optimize local gaussian
+        if target_kf_id == 0:
+            self.mapping_module.init = False;
         self.mapping_module.local_gaussian_mapping(target_kf_id, neighbor_kf_ids, src)
-
-        pass
 
     def AddDevice(self, src, K, D, w, h, bMapper = True):
         device = Device(src, K, D, w, h, bMapper = bMapper)
