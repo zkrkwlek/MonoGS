@@ -48,6 +48,9 @@ import cProfile
 #from modules.xfeat import XFeat
 #from modules.lighterglue import LighterGlue
 
+##리파인먼트 쓰레드 추가 필요
+##렌더링 결과를 바로 반환하는 코드 추가 필요
+
 class EdgeBackEnd(WinBackEnd):
     def __init__(self, config):
         super().__init__(config)
