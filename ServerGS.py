@@ -98,6 +98,7 @@ def datakf(id, src, ts = '0.0'):
     T[3, 3] = 1
 
     # sparse map
+    """"""
     res_tmp_map = sess.post(
         FACADE_SERVER_ADDR + "/Download?keyword=" + "datasparsemap" + "&id=" + str(kf_id) + "&src=" + src2, "")
     tmp_map_array = torch.from_numpy(np.frombuffer(res_tmp_map.content, dtype=np.float32).copy())
@@ -106,6 +107,50 @@ def datakf(id, src, ts = '0.0'):
 
     slam.AddKeyFrame(kf_id, image, keypoints, depth, T, device_name)
     print("Add Keyframe", b-a, kf_id)
+
+
+def _parse_single_keyframe(data: bytes, offset: int, index: int) -> tuple:
+    """단일 키프레임 파싱"""
+
+    # 1. 사용자 이름 길이 (uint8_t, 1 byte)
+    if offset >= len(data):
+        raise ValueError(f"KF{index}: offset {offset} >= data size {len(data)}")
+
+    frame_id = int(data[offset:offset+2].view(np.int16)[0])
+    offset += 2
+    scale = float(data[offset:offset + 4].view(np.float32)[0])
+    offset += 4
+    rvec_np = data[offset:offset + 12].view(np.float32).copy().reshape(3, 1)
+    offset += 12
+
+    tvec_np = data[offset:offset + 12].view(np.float32).copy().reshape(3, 1)
+    offset += 12
+
+    R_np, _ = cv2.Rodrigues(rvec_np)
+
+    # 5. NumPy -> PyTorch 변환
+    R = torch.from_numpy(R_np).float()
+    t = torch.from_numpy(tvec_np).float()
+
+    keyframe = {
+        'id':frame_id,
+        'scale':scale,
+        'R':R,
+        't':t
+    }
+    return keyframe, offset
+def parse_poses(buffer):
+    keyframes={}
+    offset = 0
+    num_keyframes = buffer[0]
+    offset += 1
+    for i in range(num_keyframes):
+        keyframe, offset = _parse_single_keyframe(
+            buffer, offset, i
+        )
+        #keyframes.append(keyframe)
+        keyframes[keyframe['id']] = keyframe
+    return keyframes
 
 def reqgsmapping(id, src, ts = '0.0'):
     strsplit = src.split('.')
@@ -117,6 +162,7 @@ def reqgsmapping(id, src, ts = '0.0'):
 
     if len(strsplit) > 4:
         neighbor_kfs = [int(x) for x in strsplit[4:]]
+        neighbor_kfs = [kf_id for kf_id in neighbor_kfs if kf_id in slam.keyframes]
     else:
         neighbor_kfs = None
 
@@ -148,6 +194,11 @@ def reqgsmapping(id, src, ts = '0.0'):
     src2 = map+'.'+device_name+'.'+frame_id
     res_pose = sess.post(
         FACADE_SERVER_ADDR + "/Download?keyword=" + "datakfpose" + "&id=" + str(kf_id) + "&src=" + src2, "")
+    buffer = np.frombuffer(res_pose.content, dtype=np.uint8)
+    kfs = parse_poses(buffer)
+
+    depth = depth*kfs[kf_id]['scale']
+    """
     pose_array = np.frombuffer(res_pose.content[:48], dtype=np.float32).copy()
     #pose_array = torch.from_numpy(pose_array)
     pose_array = pose_array.reshape(-1, 3)
@@ -157,13 +208,31 @@ def reqgsmapping(id, src, ts = '0.0'):
     T[3,3] = 1
     #R = pose_array[:3,:3]
     #t = pose_array[3,:].unsqueeze(1)
+    """
+
+    T = np.eye(4, dtype=np.float32)
+    R = kfs[kf_id]['R']
+    t = kfs[kf_id]['t']
+    T[:3, :3] = R.cpu().numpy()
+    T[:3, 3] = t.cpu().numpy().squeeze()
+
+    if neighbor_kfs is not None:
+        for nei_id in neighbor_kfs:
+            T2 = np.eye(4, dtype=np.float32)
+            R2 = kfs[nei_id]['R']
+            t2 = kfs[nei_id]['t']
+            T2[:3, :3] = R2.cpu().numpy()
+            T2[:3, 3] = t2.cpu().numpy().squeeze()
+            slam.UpdateKeyFramePose(nei_id,T2)
+            print(id, kfs[nei_id]['scale'])#, nei_id, R2, t2, T2)
 
     #sparse map
+    """
     res_tmp_map = sess.post(
         FACADE_SERVER_ADDR + "/Download?keyword=" + "datasparsemap" + "&id=" + str(kf_id) + "&src=" + src2, "")
     tmp_map_array = torch.from_numpy(np.frombuffer(res_tmp_map.content, dtype=np.float32).copy())
     tmp_map_array = tmp_map_array.reshape(-1, 4)
-
+    """
     #gaussian selection
     #gaussian generation
     #optimization

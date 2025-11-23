@@ -227,6 +227,12 @@ class EdgeGSSLAM(SLAM_WIN):
         viewpoint.T = T[:3, 3]
         self.mapping_module.viewpoints[kf_id] = viewpoint
 
+    def UpdateKeyFramePose(self, kf_id, T):
+        viewpoint = self.mapping_module.viewpoints[kf_id]
+        Tgpu = torch.from_numpy(T).cuda()
+        viewpoint.R = Tgpu[:3, :3]
+        viewpoint.T = Tgpu[:3, 3]
+
     def AddFrame(self, fid, img, R, t, depth = None, src = None, ts = None):
         device = self.devices[src]
         if fid in device.frames:
