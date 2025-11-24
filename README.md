@@ -164,6 +164,8 @@ This work incorporates many open-source codes. We extend our gratitude to the au
 - [Open3D](https://github.com/isl-org/Open3D)
 - [Point-SLAM](https://github.com/eriksandstroem/Point-SLAM)
 
+This work was supported by Institute of Information & communications Technology Planning & Evaluation(IITP) grant funded by the Korea government(MSIT) (RS-2019-II191270, WISE AR UI/UX Platform Development for Smartglasses)
+
 # License
 MonoGS is released under a **LICENSE.md**. For a list of code dependencies which are not property of the authors of MonoGS, please check **Dependencies.md**.
 
