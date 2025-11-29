@@ -198,18 +198,7 @@ def reqgsmapping(id, src, ts = '0.0'):
     kfs = parse_poses(buffer)
 
     depth = depth*kfs[kf_id]['scale']
-    """
-    pose_array = np.frombuffer(res_pose.content[:48], dtype=np.float32).copy()
-    #pose_array = torch.from_numpy(pose_array)
-    pose_array = pose_array.reshape(-1, 3)
-    T = np.zeros((4,4),dtype=np.float32)
-    T[:3,:3] = pose_array[:3,:3]
-    T[:3,3] = pose_array[3,:].T
-    T[3,3] = 1
-    #R = pose_array[:3,:3]
-    #t = pose_array[3,:].unsqueeze(1)
-    """
-
+    
     T = np.eye(4, dtype=np.float32)
     R = kfs[kf_id]['R']
     t = kfs[kf_id]['t']
