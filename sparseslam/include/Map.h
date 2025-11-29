@@ -53,6 +53,7 @@ namespace GaussianSparseSLAM {
 		//ConcurrentSet<GaussianPoint*> mspGaussianPoints;
 		ConcurrentMap<int, GaussianPoint*> mmpGaussianPoints;
 		ConcurrentMap<int, KeyFrame*> mmpKeyFrames;
+		ConcurrentMap<std::pair<int, int>, std::vector<cv::Point2i>> mapMatchesWithKFs;
 
 		std::atomic<int> mnNumMappingFrames, mnNumLoopClosingFrames;
 		//std::list<GaussianPoint*> mlpNewMPs;
